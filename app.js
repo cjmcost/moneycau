@@ -2,6 +2,11 @@ import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 
 const SUPABASE_URL = "https://exatkhjzmenobxhfiaic.supabase.co";
 const SUPABASE_KEY = "sb_publishable_TzaeqEQ1_Ypsi_fQTjRL1Q_d8X7wlua";
+// Link de "esqueci a senha": o Supabase volta para cá com type=recovery (ou com erro) no endereço.
+const urlParams = new URLSearchParams(location.hash.slice(1));
+let recovering = urlParams.get("type") === "recovery";
+const linkError = urlParams.get("error_code") === "otp_expired" ? "O link expirou ou já foi usado. Peça um novo." : urlParams.get("error_description");
+if (linkError) history.replaceState(null, "", location.pathname);
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: true, autoRefreshToken: true } });
 
 const $app = document.getElementById("app");
@@ -646,7 +651,8 @@ function viewLogin(message = "") {
     <input id="email" type="email" autocomplete="username" placeholder="E-mail" required>
     <input id="password" type="password" autocomplete="current-password" placeholder="Senha" required>
     <div class="error">${esc(message)}</div>
-    <button class="primary" type="submit">Entrar</button></form>`;
+    <button class="primary" type="submit">Entrar</button>
+    <button class="link" type="button" id="forgot">Esqueci minha senha</button></form>`;
   document.getElementById("login").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const btn = ev.target.querySelector("button");
@@ -658,11 +664,39 @@ function viewLogin(message = "") {
     btn.disabled = false;
     if (error) viewLogin(error.message === "Invalid login credentials" ? "E-mail ou senha incorretos." : error.message);
   });
+  document.getElementById("forgot").addEventListener("click", async () => {
+    const email = document.getElementById("email").value.trim();
+    if (!email) return viewLogin("Digite seu e-mail e toque de novo em Esqueci minha senha.");
+    const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
+    viewLogin(error ? error.message : "Enviamos um link para o seu e-mail. Abra o link neste aparelho para criar a nova senha.");
+  });
+}
+
+function viewNewPassword(message = "") {
+  $app.innerHTML = `<form class="login" id="newpass">
+    <h1>Nova senha</h1><p>Escolha a senha que você vai usar para entrar.</p>
+    <input id="password" type="password" autocomplete="new-password" placeholder="Nova senha (mínimo 6 caracteres)" minlength="6" required>
+    <input id="password2" type="password" autocomplete="new-password" placeholder="Repita a nova senha" minlength="6" required>
+    <div class="error">${esc(message)}</div>
+    <button class="primary" type="submit">Salvar senha</button></form>`;
+  document.getElementById("newpass").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const password = document.getElementById("password").value;
+    if (password !== document.getElementById("password2").value) return viewNewPassword("As duas senhas não são iguais.");
+    ev.target.querySelector("button").disabled = true;
+    const { error } = await sb.auth.updateUser({ password });
+    if (error) return viewNewPassword(error.message);
+    recovering = false;
+    history.replaceState(null, "", location.pathname);
+    toast("Senha alterada.");
+    start(state.session);
+  });
 }
 
 async function start(session) {
   state.session = session;
-  if (!session) { closeSheet(); return viewLogin(); }
+  if (!session) { closeSheet(); return viewLogin(linkError || ""); }
+  if (recovering) return viewNewPassword();
   $app.innerHTML = '<div class="loading">Carregando…</div>';
   try {
     await loadAll();
@@ -676,7 +710,11 @@ async function start(session) {
 // por isso o carregamento roda no próximo ciclo com setTimeout.
 let started = false;
 sb.auth.onAuthStateChange((event, session) => {
-  if (event === "INITIAL_SESSION" || event === "SIGNED_IN" && !started || event === "SIGNED_OUT") {
+  if (event === "PASSWORD_RECOVERY") {
+    recovering = true;
+    state.session = session;
+    setTimeout(() => viewNewPassword(), 0);
+  } else if (event === "INITIAL_SESSION" || event === "SIGNED_IN" && !started || event === "SIGNED_OUT") {
     started = !!session;
     setTimeout(() => start(session), 0);
   } else {
