@@ -1,6 +1,6 @@
 // Guarda a "casca" do app para abrir rápido e mesmo com internet ruim.
 // Os dados (Supabase) nunca passam pelo cache.
-const CACHE = "moneycau-v2";
+const CACHE = "moneycau-v3";
 const SHELL = [
   "./", "index.html", "styles.css", "app.js", "manifest.webmanifest",
   "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png",
@@ -22,7 +22,7 @@ self.addEventListener("fetch", (ev) => {
   const url = new URL(ev.request.url);
   if (ev.request.method !== "GET" || url.hostname.endsWith("supabase.co")) return;
   ev.respondWith(
-    fetch(ev.request)
+    fetch(ev.request, { cache: "no-cache" })
       .then((res) => {
         if (res.ok) caches.open(CACHE).then((c) => c.put(ev.request, res.clone()));
         return res;

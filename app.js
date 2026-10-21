@@ -271,14 +271,28 @@ async function viewRecent() {
 
 // Tela: Agendados ----------------------------------------------------------------
 
-function installment(s) {
-  if (!s.repeatable || !s.end_date) return "";
-  const months = s.interval_unit === "year" ? 12 * s.interval_count : s.interval_count;
-  const span = (d) => { const x = parseDate(d); return x.getFullYear() * 12 + x.getMonth(); };
-  const total = Math.floor((span(s.end_date) - span(s.first_date)) / months) + 1;
-  const now = Math.floor((span(s.next_date) - span(s.first_date)) / months) + 1;
-  return total > 1 ? `parcela ${now}/${total}` : "";
+// Ocorrências já passadas e total da série (total nulo = sem fim). Mesma conta de save_scheduled.
+function schedProgress(s) {
+  if (!s.repeatable) return { done: 0, total: null };
+  let steps;
+  if (s.interval_unit === "month" || s.interval_unit === "year") {
+    const months = s.interval_unit === "year" ? 12 * s.interval_count : s.interval_count;
+    const span = (d) => { const x = parseDate(d); return x.getFullYear() * 12 + x.getMonth(); };
+    steps = (d) => Math.floor((span(d) - span(s.first_date)) / months);
+  } else {
+    const days = (s.interval_unit === "week" ? 7 : 1) * s.interval_count;
+    steps = (d) => Math.floor((parseDate(d) - parseDate(s.first_date)) / 864e5 / days);
+  }
+  return { done: steps(s.next_date), total: s.end_date ? steps(s.end_date) + 1 : null };
 }
+
+function installment(s) {
+  const { done, total } = schedProgress(s);
+  return total > 1 ? `parcela ${done + 1}/${total}` : "";
+}
+
+const REPEATS = [["none", "Não repete"], ["week:1", "Toda semana"], ["month:1", "Todo mês"], ["month:2", "A cada 2 meses"],
+  ["month:3", "A cada 3 meses"], ["month:4", "A cada 4 meses"], ["month:6", "A cada 6 meses"], ["year:1", "Todo ano"]];
 
 function scheduledRow(s) {
   const acc = state.accById.get(s.account_id);
@@ -288,7 +302,7 @@ function scheduledRow(s) {
   const meta = [dayLabel(s.next_date), (acc?.name || "sem conta") + (to ? " → " + to.name : "")].join(" · ");
   const parc = installment(s);
   return `<div class="row">
-    <div class="main"><div class="title">${esc(title)}${parc ? `<span class="badge">${parc}</span>` : ""}${late ? '<span class="badge warn">vencido</span>' : ""}</div>
+    <div class="main" data-action="edit-sched" data-id="${s.id}"><div class="title">${esc(title)}${parc ? `<span class="badge">${parc}</span>` : ""}${late ? '<span class="badge warn">vencido</span>' : ""}</div>
       <div class="meta">${esc(meta)}</div></div>
     <div class="amount ${signClass(s.amount)}">${money(s.amount, s.currency)}</div>
     <div class="actions"><button class="btn-ok" data-action="confirm-sched" data-id="${s.id}">Lançar</button></div>
@@ -302,7 +316,7 @@ function viewScheduled() {
     ["Próximos 7 dias", (s) => s.next_date > t && s.next_date <= in7],
     ["Próximos 30 dias", (s) => s.next_date > in7 && s.next_date <= in30],
   ];
-  let html = `<div class="topbar"><h1>Agendados</h1></div>`;
+  let html = `<div class="topbar"><h1>Agendados</h1><button class="back" data-action="new-sched">+ Novo</button></div>`;
   for (const [title, test] of buckets) {
     const list = state.scheduled.filter(test);
     if (list.length) html += `<div class="section-title"><span>${title}</span><span>${list.length}</span></div>
@@ -368,13 +382,20 @@ function openEntry(init = {}) {
     toAccount: init.toAccount || store("mc.last.transfer.to") || null,
     payee: init.payee || "",
     category: init.category || null,
-    categoryTouched: !!init.category,
+    categoryTouched: !!init.category || !!init.multiSplit,
     date: init.date || today(),
     description: init.description || "",
     notes: init.notes || "",
     tags: init.tags || [],
     readOnly: init.readOnly || null,
     scheduled: init.scheduled || null,
+    // edição da definição de um agendado: schedId é o id (null = novo agendado)
+    schedEdit: !!init.schedEdit,
+    schedId: init.schedId || null,
+    repeat: init.repeat || "month:1",
+    total: init.total ?? null,
+    done: init.done || 0,
+    multiSplit: init.multiSplit || 0,
   };
   drawEntry();
   if (!entry.id && !entry.readOnly) setTimeout(() => document.getElementById("amount")?.focus(), 250);
@@ -387,8 +408,12 @@ function drawEntry() {
   const from = state.accById.get(e.account);
   const to = state.accById.get(e.toAccount);
   const fx = e.kind === "transfer" && from && to && from.currency !== to.currency;
-  const title = e.scheduled ? "Lançar agendado" : e.id ? "Editar lançamento" : "Novo lançamento";
-  const cat = e.category ? esc(catLabel(e.category)) : "Escolher";
+  const title = e.scheduled ? "Lançar agendado" : e.schedEdit ? (e.schedId ? "Editar agendado" : "Novo agendado")
+    : e.id ? "Editar lançamento" : "Novo lançamento";
+  const cat = e.category ? esc(catLabel(e.category))
+    : e.multiSplit ? `${e.multiSplit} categorias (mantidas)` : "Escolher";
+  const repeats = REPEATS.some(([v]) => v === e.repeat) ? REPEATS
+    : [...REPEATS, [e.repeat, `A cada ${e.repeat.split(":")[1]} ${{ day: "dias", week: "semanas", month: "meses", year: "anos" }[e.repeat.split(":")[0]]}`]];
   const disabled = e.readOnly ? "disabled" : "";
   // num agendado, só valor e data mudam; o resto vem da definição do agendado
   const lock = disabled || (e.scheduled ? "disabled" : "");
@@ -414,11 +439,18 @@ function drawEntry() {
         <div class="suggest" id="suggest" hidden></div></div>
       <div class="field"><label>Categoria</label>
         <button class="picker ${e.category ? "" : "placeholder"}" data-action="pick-cat" ${lock}>${cat}</button></div>` : ""}
-      <div class="field"><label>Data</label><input id="date" type="date" value="${e.date}" ${disabled}></div>
+      <div class="field"><label>${e.schedEdit ? "Próxima data" : "Data"}</label><input id="date" type="date" value="${e.date}" ${disabled}></div>
       <div class="field"><label>Descrição</label><input id="description" value="${esc(e.description)}" placeholder="Opcional" ${lock}></div>
+      ${e.schedEdit ? `<div class="field"><label>Repetição</label>
+        <select id="repeat">${repeats.map(([v, l]) => `<option value="${v}" ${v === e.repeat ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      ${e.repeat !== "none" ? `<div class="field"><label>Parcelas</label>
+        <input id="total" inputmode="numeric" autocomplete="off" value="${e.total ?? ""}" placeholder="Sem fim">
+        ${e.done ? `<div class="hint">A próxima é a parcela ${e.done + 1}. Deixe em branco se não tiver fim.</div>`
+          : '<div class="hint">Total de parcelas. Deixe em branco se não tiver fim.</div>'}</div>` : ""}` : ""}
     </div>
     ${e.id ? '<button class="danger" data-action="delete">Apagar lançamento</button>' : ""}
     ${e.scheduled ? '<button class="danger" data-action="skip-sched">Pular esta ocorrência</button>' : ""}
+    ${e.schedId ? '<button class="danger" data-action="end-sched">Encerrar agendado</button>' : ""}
   </div>`;
 }
 
@@ -430,6 +462,8 @@ function readEntryFields() {
   if (v("payee") !== undefined) entry.payee = v("payee");
   if (v("date")) entry.date = v("date");
   if (v("description") !== undefined) entry.description = v("description");
+  if (v("repeat")) entry.repeat = v("repeat");
+  if (v("total") !== undefined) entry.total = Number(v("total").replace(/\D/g, "")) || null;
 }
 
 function payeeSuggestions(text) {
@@ -490,7 +524,21 @@ async function saveEntry() {
   const fx = e.kind === "transfer" && state.accById.get(e.account)?.currency !== state.accById.get(e.toAccount)?.currency;
   if (fx && e.toCents <= 0) return toast("Informe o valor recebido");
 
-  if (e.scheduled) {
+  if (e.schedEdit && e.repeat !== "none" && e.total && e.total <= e.done)
+    return toast(`O total precisa ser maior que ${e.done}, que já passaram`);
+
+  if (e.schedEdit) {
+    const [unit, count] = e.repeat === "none" ? ["month", 1] : e.repeat.split(":");
+    await must(sb.rpc("save_scheduled", {
+      p_id: e.schedId, p_kind: e.kind, p_account: e.account, p_amount: e.cents / 100, p_next_date: e.date,
+      p_payee_name: e.kind === "transfer" ? null : e.payee || null,
+      p_category: e.kind === "transfer" ? null : e.category,
+      p_description: e.description || null,
+      p_to_account: e.kind === "transfer" ? e.toAccount : null,
+      p_repeatable: e.repeat !== "none", p_unit: unit, p_count: Number(count),
+      p_total: e.repeat === "none" ? null : e.total,
+    }));
+  } else if (e.scheduled) {
     await must(sb.rpc("execute_scheduled", { p_id: e.scheduled, p_date: e.date, p_amount: e.cents / 100 }));
   } else {
     await must(sb.rpc("save_entry", {
@@ -504,9 +552,9 @@ async function saveEntry() {
   }
   store("mc.last." + e.kind, e.account);
   if (e.kind === "transfer") store("mc.last.transfer.to", e.toAccount);
-  const wasScheduled = !!e.scheduled;
+  const wasScheduled = !!e.scheduled || e.schedEdit;
   closeSheet();
-  toast(wasScheduled ? "Agendado lançado" : "Lançamento salvo");
+  toast(e.schedEdit ? "Agendado salvo" : e.scheduled ? "Agendado lançado" : "Lançamento salvo");
   await afterChange(wasScheduled);
 }
 
@@ -555,6 +603,20 @@ function openScheduled(id) {
     category: splits.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))[0]?.category_id || null });
 }
 
+function editScheduled(id) {
+  const s = state.scheduled.find((x) => x.id === id);
+  if (!s) return;
+  const fromIsAccount = !(s.kind === "transfer" && s.amount > 0);
+  const splits = s.scheduled_splits || [];
+  const { done, total } = schedProgress(s);
+  openEntry({ kind: s.kind, schedEdit: true, schedId: s.id, date: s.next_date, cents: Math.round(Math.abs(s.amount) * 100),
+    account: fromIsAccount ? s.account_id : s.recipient_account_id,
+    toAccount: fromIsAccount ? s.recipient_account_id : s.account_id,
+    payee: state.payeeById.get(s.payee_id)?.name || "", description: s.description || "",
+    category: splits.length === 1 ? splits[0].category_id : null, multiSplit: splits.length > 1 ? splits.length : 0,
+    repeat: s.repeatable ? `${s.interval_unit}:${s.interval_count}` : "none", total, done });
+}
+
 // Eventos ----------------------------------------------------------------------
 
 document.addEventListener("click", async (ev) => {
@@ -573,7 +635,7 @@ document.addEventListener("click", async (ev) => {
     case "kind":
       readEntryFields();
       entry.kind = el.dataset.kind;
-      if (!entry.id) entry.account = store("mc.last." + entry.kind) || entry.account;
+      if (!entry.id && !entry.schedId) entry.account = store("mc.last." + entry.kind) || entry.account;
       if (entry.category && state.catById.get(entry.category)?.kind !== entry.kind) entry.category = null;
       return drawEntry();
     case "pick-cat": return openCategoryPicker();
@@ -589,6 +651,12 @@ document.addEventListener("click", async (ev) => {
       await must(sb.rpc("skip_scheduled", { p_id: entry.scheduled }));
       closeSheet(); toast("Ocorrência pulada"); return afterChange(true);
     case "confirm-sched": return openScheduled(id);
+    case "edit-sched": return editScheduled(id);
+    case "new-sched": return openEntry({ schedEdit: true });
+    case "end-sched":
+      if (!confirm("Encerrar este agendado? Ele sai da lista; o que já foi lançado continua no extrato.")) return;
+      await must(sb.rpc("end_scheduled", { p_id: entry.schedId }));
+      closeSheet(); toast("Agendado encerrado"); return afterChange(true);
     case "edit-tx": return openTransaction(id);
     case "more": return pageLoader?.();
     case "toggle-archived": state.showArchived = !state.showArchived; return viewAccounts();
@@ -616,7 +684,7 @@ document.addEventListener("input", (ev) => {
 
 document.addEventListener("change", (ev) => {
   if (!entry) return;
-  if (["account", "toAccount"].includes(ev.target.id)) { readEntryFields(); drawEntry(); }
+  if (["account", "toAccount", "repeat"].includes(ev.target.id)) { readEntryFields(); drawEntry(); }
 });
 
 // Rotas ------------------------------------------------------------------------
