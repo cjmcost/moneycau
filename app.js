@@ -83,6 +83,7 @@ const ICONS = {
   wallet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="6" width="18" height="13" rx="2.5"/><path d="M3 10h18M16 14.5h2"/></svg>',
   clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
   list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 6.5h12M8 12h12M8 17.5h12"/><circle cx="4" cy="6.5" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="17.5" r="1"/></svg>',
+  chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20h16"/><rect x="5.5" y="11" width="3" height="6" rx="1"/><rect x="10.5" y="5" width="3" height="12" rx="1"/><rect x="15.5" y="8.5" width="3" height="8.5" rx="1"/></svg>',
   more: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="5.5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18.5" cy="12" r="1.5"/></svg>',
 };
 
@@ -129,7 +130,7 @@ function tabbar(active) {
     ${tab("contas", "wallet", "Contas")}
     ${tab("agendados", "clock", "Agendados", due ? `<span class="dot">${due}</span>` : "")}
     <button class="fab" data-action="new" aria-label="Novo lançamento">+</button>
-    ${tab("recentes", "list", "Recentes")}
+    ${tab("relatorios", "chart", "Relatórios")}
     ${tab("mais", "more", "Mais")}
   </nav>`;
 }
@@ -264,9 +265,10 @@ async function viewRecent() {
     .lte("date", today()).neq("kind", "transfer_in")
     .order("date", { ascending: false }).order("created_at", { ascending: false }).range(0, PAGE - 1));
   rows.forEach((t) => txCache.set(t.id, t));
-  render(`<div class="topbar"><h1>Recentes</h1></div>
+  render(`<div class="topbar"><button class="back" data-go="#/mais">‹ Mais</button></div>
+    <div class="topbar"><h1>Recentes</h1></div>
     ${rows.length ? groupByMonth(rows, (t) => txRow(t, { withAccount: true, currency: state.accById.get(t.account_id)?.currency })) : '<div class="empty">Nenhum lançamento.</div>'}`,
-    "recentes");
+    "mais");
 }
 
 // Tela: Agendados ----------------------------------------------------------------
@@ -338,8 +340,8 @@ function viewMore() {
       <div class="row"><div class="main"><div class="title">Conectado como</div>
         <div class="meta">${esc(state.session?.user?.email)}</div></div></div>
       <button class="row" data-action="reload"><div class="main"><div class="title">Atualizar dados</div></div></button>
-      <button class="row" data-go="#/relatorios"><div class="main"><div class="title">Relatórios</div>
-        <div class="meta">PL, PL M-1, PL M+1 e os demais do MoneyWiz</div></div><span class="chev">›</span></button>
+      <button class="row" data-go="#/recentes"><div class="main"><div class="title">Recentes</div>
+        <div class="meta">Últimos lançamentos de todas as contas</div></div><span class="chev">›</span></button>
       <button class="row" data-go="#/orcamento"><div class="main"><div class="title">Exportar para o Orçamento</div>
         <div class="meta">Resumo do mês em CSV, no formato do MoneyWiz</div></div><span class="chev">›</span></button>
     </div>
@@ -457,12 +459,11 @@ async function viewReports() {
   state.reports = await must(sb.from("reports").select("id,name,config,display_order").order("display_order").order("name"));
   const ready = state.reports.filter((r) => r.config?.type === "summary");
   const later = state.reports.filter((r) => r.config?.type !== "summary");
-  render(`<div class="topbar"><button class="back" data-go="#/mais">‹ Mais</button></div>
-    <div class="topbar"><h1>Relatórios</h1></div>
+  render(`<div class="topbar"><h1>Relatórios</h1></div>
     <div class="list">${ready.map((r) => `<button class="row" data-go="#/relatorio/${r.id}"><div class="main">
       <div class="title">${esc(r.name)}</div><div class="meta">${periodLabel(reportPeriod(r.config))}</div></div><span class="chev">›</span></button>`).join("")}</div>
     <div class="section-title"><span>Em breve (${later.length})</span></div>
-    <div class="list">${later.map((r) => `<div class="row"><div class="main"><div class="title muted">${esc(r.name)}</div></div></div>`).join("")}</div>`, "mais");
+    <div class="list">${later.map((r) => `<div class="row"><div class="main"><div class="title muted">${esc(r.name)}</div></div></div>`).join("")}</div>`, "relatorios");
 }
 
 async function viewReport(id) {
@@ -480,7 +481,7 @@ async function viewReport(id) {
     <div class="meta-line">${periodLabel(period)} · ${r.config.accounts.length} conta${r.config.accounts.length === 1 ? "" : "s"}</div>
     ${summaryHero(rows, r.config.scheduled && period.to >= today())}
     ${summarySections(rows)}
-    ${rows.length ? `<button class="more" data-action="report-export">Exportar CSV</button>` : ""}`, "mais");
+    ${rows.length ? `<button class="more" data-action="report-export">Exportar CSV</button>` : ""}`, "relatorios");
 }
 
 // Folha: lançamento --------------------------------------------------------------
