@@ -167,3 +167,14 @@ button { cursor: pointer; }
 .chev { color: var(--muted); font-size: 20px; }
 .meta-line { color: var(--muted); font-size: 14px; margin: -4px 0 12px; }
 .title.muted { color: var(--muted); }
+
+/* busca nas listas e subcategorias dos relatórios */
+.search.page { background: var(--surface); margin: 0 0 12px; }
+.row .chev { transition: transform 0.15s; }
+.row.open .chev { transform: rotate(90deg); }
+.chev.blank { visibility: hidden; }
+.sub-rows { background: var(--surface-2); }
+.row.sub { padding-left: 32px; font-size: 15px; }
+.row.sub .amount { color: var(--muted); }
+.sub-rows { border-bottom: 1px solid var(--line); }
+.sub-rows:last-child, .sub-rows .row:last-child, .row:has(+ .sub-rows[hidden]:last-child) { border-bottom: 0; }

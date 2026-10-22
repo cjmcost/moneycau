@@ -50,6 +50,23 @@ const dayLabel = (iso) => fmtDay.format(parseDate(iso)).replace(".", "");
 const monthLabel = (iso) => { const s = fmtMonth.format(parseDate(iso)); return s[0].toUpperCase() + s.slice(1); };
 const signClass = (v) => (Number(v) < 0 ? "neg" : Number(v) > 0 ? "pos" : "");
 
+// Busca sem acento e sem diferenciar maiúsculas; um número em pt-BR ("19,50") também casa com o valor.
+const norm = (v) => String(v ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+function queryAmount(q) {
+  const s = q.replace(/^(R\$)?\s*-?/i, "");
+  return /^[0-9.]+(,[0-9]{1,2})?$/.test(s) ? Number(s.replace(/\./g, "").replace(",", ".")) : null;
+}
+
+function searchBox(placeholder, value = "") {
+  return `<input class="search page" id="q" type="search" placeholder="${placeholder}" value="${esc(value)}" autocomplete="off" enterkeyhint="search">`;
+}
+
+let searchTimer;
+function onSearch(fn) {
+  const box = document.getElementById("q");
+  box.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => fn(box.value.trim()), 300); });
+}
+
 function store(key, value) {
   try {
     if (value === undefined) return localStorage.getItem(key);
@@ -180,7 +197,7 @@ function viewAccounts() {
 
 // Tela: Extrato de uma conta -----------------------------------------------------
 
-const TX_SELECT = "id,kind,date,amount,description,notes,payee_id,account_id,transfer_peer_id," +
+const TX_SELECT = "id,kind,date,created_at,amount,description,notes,payee_id,account_id,transfer_peer_id," +
   "transaction_splits(category_id,amount),peer:transfer_peer_id(account_id,amount)";
 const PAGE = 100;
 
@@ -235,40 +252,58 @@ async function viewAccount(id) {
   const a = state.accById.get(id);
   if (!a) return go("#/contas");
   const b = state.balances.get(id) || {};
-  const rows = [];
-  const draw = (hasMore) => {
-    let running = Number(b.projected_balance || 0);
-    const balances = rows.map((t) => { const r = running; running -= Number(t.amount); return r; });
-    render(`<div class="topbar"><button class="back" data-go="#/contas">‹ Contas</button></div>
-      <div class="hero"><div class="label">${esc(a.name)}</div>
-        <div class="value ${signClass(b.current_balance)}">${money(b.current_balance, a.currency)}</div>
-        <div class="sub">Previsto ${money(b.projected_balance, a.currency)}</div></div>
-      ${rows.length ? groupByMonth(rows, (t, i) => txRow(t, { running: balances[i], currency: a.currency })) : '<div class="empty">Nenhum lançamento.</div>'}
-      ${hasMore ? '<button class="more" data-action="more">Carregar mais</button>' : ""}`, "contas");
-  };
+  render(`<div class="topbar"><button class="back" data-go="#/contas">‹ Contas</button></div>
+    <div class="hero"><div class="label">${esc(a.name)}</div>
+      <div class="value ${signClass(b.current_balance)}">${money(b.current_balance, a.currency)}</div>
+      <div class="sub">Previsto ${money(b.projected_balance, a.currency)}</div></div>
+    ${searchBox("Buscar nesta conta", lastQuery())}<div id="tx-list"></div>`, "contas");
+  await txList({
+    load: (q) => q ? sb.rpc("search_transactions", { p_query: q, p_account: id }).select(TX_SELECT)
+      : sb.from("transactions").select(TX_SELECT).eq("account_id", id),
+    // o saldo linha a linha só faz sentido no extrato completo
+    rowsHtml: (rows, q) => {
+      let running = Number(b.projected_balance || 0);
+      return groupByMonth(rows, (t) => {
+        const r = running; running -= Number(t.amount);
+        return txRow(t, { running: q ? null : r, currency: a.currency });
+      });
+    },
+  });
+}
+
+// Lista paginada de lançamentos com busca. A busca fica guardada para a mesma tela,
+// assim voltar de uma edição não a perde.
+const lastQuery = () => (state.search?.hash === location.hash ? state.search.q : "");
+
+async function txList({ load, rowsHtml }) {
+  let rows = [], q = lastQuery(), gen = 0;
+  const $list = document.getElementById("tx-list");
   const loadPage = async () => {
-    const page = await must(sb.from("transactions").select(TX_SELECT).eq("account_id", id)
-      .order("date", { ascending: false }).order("created_at", { ascending: false })
+    const g = gen;
+    const page = await must(load(q).order("date", { ascending: false }).order("created_at", { ascending: false })
       .range(rows.length, rows.length + PAGE - 1));
+    if (g !== gen || !$list.isConnected) return; // a busca mudou ou a tela já é outra
     page.forEach((t) => txCache.set(t.id, t));
     rows.push(...page);
-    draw(page.length === PAGE);
+    $list.innerHTML = (rows.length ? rowsHtml(rows, q) : `<div class="empty">${q ? "Nada encontrado." : "Nenhum lançamento."}</div>`) +
+      (page.length === PAGE ? '<button class="more" data-action="more">Carregar mais</button>' : "");
   };
   pageLoader = loadPage;
+  onSearch((v) => { q = v; state.search = { hash: location.hash, q }; gen++; rows = []; loadPage(); });
   await loadPage();
 }
 
 // Tela: Recentes -----------------------------------------------------------------
 
 async function viewRecent() {
-  const rows = await must(sb.from("transactions").select(TX_SELECT)
-    .lte("date", today()).neq("kind", "transfer_in")
-    .order("date", { ascending: false }).order("created_at", { ascending: false }).range(0, PAGE - 1));
-  rows.forEach((t) => txCache.set(t.id, t));
   render(`<div class="topbar"><button class="back" data-go="#/mais">‹ Mais</button></div>
     <div class="topbar"><h1>Recentes</h1></div>
-    ${rows.length ? groupByMonth(rows, (t) => txRow(t, { withAccount: true, currency: state.accById.get(t.account_id)?.currency })) : '<div class="empty">Nenhum lançamento.</div>'}`,
-    "mais");
+    ${searchBox("Buscar em todas as contas", lastQuery())}<div id="tx-list"></div>`, "mais");
+  await txList({
+    load: (q) => q ? sb.rpc("search_transactions", { p_query: q }).select(TX_SELECT)
+      : sb.from("transactions").select(TX_SELECT).lte("date", today()).neq("kind", "transfer_in"),
+    rowsHtml: (rows) => groupByMonth(rows, (t) => txRow(t, { withAccount: true, currency: state.accById.get(t.account_id)?.currency })),
+  });
 }
 
 // Tela: Agendados ----------------------------------------------------------------
@@ -311,14 +346,38 @@ function scheduledRow(s) {
   </div>`;
 }
 
+function schedMatches(s, q) {
+  const n = norm(q), val = queryAmount(q);
+  const text = [s.description, state.payeeById.get(s.payee_id)?.name, state.accById.get(s.account_id)?.name,
+    state.accById.get(s.recipient_account_id)?.name, ...(s.scheduled_splits || []).map((x) => catLabel(x.category_id))];
+  return text.some((v) => norm(v).includes(n)) || (val !== null && Math.abs(Number(s.amount)) === val);
+}
+
 function viewScheduled() {
+  state.schedQuery ??= "";
+  render(`<div class="topbar"><h1>Agendados</h1><button class="back" data-action="new-sched">+ Novo</button></div>
+    ${searchBox("Buscar agendados", state.schedQuery)}<div id="sched-list"></div>`, "agendados");
+  drawScheduled();
+  onSearch((v) => { state.schedQuery = v; drawScheduled(); });
+}
+
+function drawScheduled() {
+  const $list = document.getElementById("sched-list");
+  if (!$list) return;
+  const q = state.schedQuery;
+  if (q) {
+    const found = state.scheduled.filter((s) => schedMatches(s, q));
+    $list.innerHTML = found.length ? `<div class="section-title"><span>Resultados</span><span>${found.length}</span></div>
+      <div class="list">${found.map(scheduledRow).join("")}</div>` : '<div class="empty">Nada encontrado.</div>';
+    return;
+  }
   const t = today(), in7 = addDays(t, 7), in30 = addDays(t, 30);
   const buckets = [
     ["Vencidos e hoje", (s) => s.next_date <= t],
     ["Próximos 7 dias", (s) => s.next_date > t && s.next_date <= in7],
     ["Próximos 30 dias", (s) => s.next_date > in7 && s.next_date <= in30],
   ];
-  let html = `<div class="topbar"><h1>Agendados</h1><button class="back" data-action="new-sched">+ Novo</button></div>`;
+  let html = "";
   for (const [title, test] of buckets) {
     const list = state.scheduled.filter(test);
     if (list.length) html += `<div class="section-title"><span>${title}</span><span>${list.length}</span></div>
@@ -329,7 +388,7 @@ function viewScheduled() {
     <button class="collapser" data-action="toggle-later">${state.showLater ? "Ocultar" : "Mostrar"}</button></div>`;
   if (state.showLater) html += `<div class="list">${later.map(scheduledRow).join("")}</div>`;
   if (!state.scheduled.length) html += '<div class="empty">Nenhum agendado ativo.</div>';
-  render(html, "agendados");
+  $list.innerHTML = html;
 }
 
 // Tela: Mais ---------------------------------------------------------------------
@@ -388,6 +447,22 @@ async function downloadFile(name, text) {
 const monthEnd = (iso) => { const [y, m] = iso.split("-").map(Number); return addDays(`${y + (m === 12 ? 1 : 0)}-${pad(m === 12 ? 1 : m + 1)}-01`, -1); };
 const summaryRows = (raw) => raw.map((r) => ({ ...r, amount: Number(r.amount) }))
   .sort((a, b) => a.category.localeCompare(b.category, "pt-BR"));
+
+// Linhas de report_lines (por subcategoria) agrupadas na categoria principal, com as
+// subcategorias em children. O lançado direto na principal aparece como "(sem subcategoria)".
+function groupLines(raw) {
+  const map = new Map();
+  for (const l of raw) {
+    const key = l.section + "|" + l.category;
+    if (!map.has(key)) map.set(key, { section: l.section, category: l.category, amount: 0, children: [] });
+    const g = map.get(key);
+    g.amount += Number(l.amount);
+    g.children.push({ name: l.subcategory ?? "(sem subcategoria)", amount: Number(l.amount) });
+  }
+  const rows = [...map.values()].filter((g) => Math.abs(g.amount) >= 0.005);
+  rows.forEach((g) => { g.amount = Math.round(g.amount * 100) / 100; if (g.children.length === 1 && g.children[0].name === "(sem subcategoria)") g.children = []; });
+  return summaryRows(rows);
+}
 const sectionSum = (rows, sec) => rows.filter((r) => r.section === sec).reduce((s, r) => s + r.amount, 0);
 
 function summaryHero(rows, withScheduled) {
@@ -402,8 +477,13 @@ function summarySections(rows) {
   const section = (sec, title) => {
     const list = rows.filter((r) => r.section === sec);
     return list.length ? `<div class="section-title"><span>${title}</span><span>${money(sectionSum(rows, sec))}</span></div>
-      <div class="list">${list.map((r) => `<div class="row"><div class="main"><div class="title">${esc(r.category)}</div></div>
-        <div class="amount">${money(r.amount)}</div></div>`).join("")}</div>` : "";
+      <div class="list">${list.map((r) => r.children?.length ? `<button class="row" data-action="toggle-sub">
+          <div class="main"><div class="title">${esc(r.category)}</div></div>
+          <div class="amount">${money(r.amount)}</div><span class="chev">›</span></button>
+        <div class="sub-rows" hidden>${r.children.map((c) => `<div class="row sub"><div class="main"><div class="title">${esc(c.name)}</div></div>
+          <div class="amount">${money(c.amount)}</div></div>`).join("")}</div>`
+        : `<div class="row"><div class="main"><div class="title">${esc(r.category)}</div></div>
+        <div class="amount">${money(r.amount)}</div>${rows.some((x) => x.children?.length) ? '<span class="chev blank">›</span>' : ""}</div>`).join("")}</div>` : "";
   };
   return section("income", "Rendimentos") + section("expense", "Gastos") +
     (rows.length ? "" : '<div class="empty">Nada lançado neste período.</div>');
@@ -471,7 +551,7 @@ async function viewReport(id) {
   const r = state.reports.find((x) => x.id === id);
   if (!r || r.config?.type !== "summary") return go("#/relatorios");
   const period = reportPeriod(r.config);
-  const rows = summaryRows(await must(sb.rpc("report_summary", {
+  const rows = groupLines(await must(sb.rpc("report_lines", {
     p_from: period.from, p_to: period.to, p_accounts: r.config.accounts,
     p_categories: r.config.categories, p_scheduled: r.config.scheduled })));
   state.reportRows = rows;
@@ -797,7 +877,7 @@ document.addEventListener("click", async (ev) => {
     case "edit-tx": return openTransaction(id);
     case "more": return pageLoader?.();
     case "toggle-archived": state.showArchived = !state.showArchived; return viewAccounts();
-    case "toggle-later": state.showLater = !state.showLater; return viewScheduled();
+    case "toggle-later": state.showLater = !state.showLater; return drawScheduled();
     case "reload": await loadAll(); toast("Dados atualizados"); return route();
     case "budget-month": {
       const [y, m] = state.budgetMonth.split("-").map(Number);
@@ -810,6 +890,7 @@ document.addEventListener("click", async (ev) => {
       return downloadFile(`${MONTHS[m - 1]} ${y}.csv`, budgetCsv(state.budgetRows));
     }
     case "report-export": return downloadFile(state.reportFile, budgetCsv(state.reportRows));
+    case "toggle-sub": { const sub = el.nextElementSibling; sub.hidden = !sub.hidden; el.classList.toggle("open", !sub.hidden); return; }
     case "toggle-budget-accounts": state.showBudgetAccounts = !state.showBudgetAccounts; return viewBudget();
     case "logout": await sb.auth.signOut(); return;
   }
