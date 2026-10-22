@@ -338,13 +338,12 @@ function viewMore() {
       <div class="row"><div class="main"><div class="title">Conectado como</div>
         <div class="meta">${esc(state.session?.user?.email)}</div></div></div>
       <button class="row" data-action="reload"><div class="main"><div class="title">Atualizar dados</div></div></button>
+      <button class="row" data-go="#/relatorios"><div class="main"><div class="title">Relatórios</div>
+        <div class="meta">PL, PL M-1, PL M+1 e os demais do MoneyWiz</div></div><span class="chev">›</span></button>
       <button class="row" data-go="#/orcamento"><div class="main"><div class="title">Exportar para o Orçamento</div>
         <div class="meta">Resumo do mês em CSV, no formato do MoneyWiz</div></div><span class="chev">›</span></button>
     </div>
-    <div class="section-title"><span>Em breve</span></div>
-    <div class="list">
-      <div class="row"><div class="main"><div class="title">Relatórios</div><div class="meta">Os 24 relatórios do MoneyWiz</div></div></div>
-    </div>
+
     <button class="danger" data-action="logout">Sair</button>`, "mais");
 }
 
@@ -384,6 +383,30 @@ async function downloadFile(name, text) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
+const monthEnd = (iso) => { const [y, m] = iso.split("-").map(Number); return addDays(`${y + (m === 12 ? 1 : 0)}-${pad(m === 12 ? 1 : m + 1)}-01`, -1); };
+const summaryRows = (raw) => raw.map((r) => ({ ...r, amount: Number(r.amount) }))
+  .sort((a, b) => a.category.localeCompare(b.category, "pt-BR"));
+const sectionSum = (rows, sec) => rows.filter((r) => r.section === sec).reduce((s, r) => s + r.amount, 0);
+
+function summaryHero(rows, withScheduled) {
+  const inc = sectionSum(rows, "income"), exp = sectionSum(rows, "expense");
+  return `<div class="hero"><div class="label">Saldo</div>
+    <div class="value ${signClass(inc - exp)}">${money(inc - exp)}</div>
+    <div class="sub">Receitas ${money(inc)} · Despesas ${money(exp)}</div>
+    ${withScheduled ? '<div class="sub">Inclui os agendados previstos até o fim do período.</div>' : ""}</div>`;
+}
+
+function summarySections(rows) {
+  const section = (sec, title) => {
+    const list = rows.filter((r) => r.section === sec);
+    return list.length ? `<div class="section-title"><span>${title}</span><span>${money(sectionSum(rows, sec))}</span></div>
+      <div class="list">${list.map((r) => `<div class="row"><div class="main"><div class="title">${esc(r.category)}</div></div>
+        <div class="amount">${money(r.amount)}</div></div>`).join("")}</div>` : "";
+  };
+  return section("income", "Rendimentos") + section("expense", "Gastos") +
+    (rows.length ? "" : '<div class="empty">Nada lançado neste período.</div>');
+}
+
 async function viewBudget() {
   if (!state.budgetMonth) {
     // padrão: mês anterior até o dia 10, depois o mês atual
@@ -394,36 +417,70 @@ async function viewBudget() {
   const m = state.budgetMonth;
   const [y, mo] = m.split("-").map(Number);
   const raw = await must(sb.rpc("budget_summary", { p_month: m }));
-  const rows = raw.map((r) => ({ ...r, amount: Number(r.amount) }))
-    .sort((a, b) => a.category.localeCompare(b.category, "pt-BR"));
+  const rows = summaryRows(raw);
   state.budgetRows = rows;
-  const sum = (sec) => rows.filter((r) => r.section === sec).reduce((s, r) => s + r.amount, 0);
-  const inc = sum("income"), exp = sum("expense");
-  const lastDay = addDays(`${y + (mo === 12 ? 1 : 0)}-${pad(mo === 12 ? 1 : mo + 1)}-01`, -1);
-  const forecast = lastDay >= today();
-  const section = (sec, title) => {
-    const list = rows.filter((r) => r.section === sec);
-    return list.length ? `<div class="section-title"><span>${title}</span><span>${money(sum(sec))}</span></div>
-      <div class="list">${list.map((r) => `<div class="row"><div class="main"><div class="title">${esc(r.category)}</div></div>
-        <div class="amount">${money(r.amount)}</div></div>`).join("")}</div>` : "";
-  };
   const accounts = state.accounts.filter((a) => a.in_budget || a.account_group !== "archived");
   render(`<div class="topbar"><button class="back" data-go="#/mais">‹ Mais</button></div>
     <div class="month-nav"><button data-action="budget-month" data-step="-1" aria-label="Mês anterior">‹</button>
       <h1>${MONTHS[mo - 1]} ${y}</h1>
       <button data-action="budget-month" data-step="1" aria-label="Próximo mês">›</button></div>
-    <div class="hero"><div class="label">Saldo do mês</div>
-      <div class="value ${signClass(inc - exp)}">${money(inc - exp)}</div>
-      <div class="sub">Receitas ${money(inc)} · Despesas ${money(exp)}</div>
-      ${forecast ? '<div class="sub">Inclui os agendados previstos até o fim do mês.</div>' : ""}</div>
+    ${summaryHero(rows, monthEnd(m) >= today())}
     <button class="primary" data-action="budget-export" ${rows.length ? "" : "disabled"}>Exportar “${MONTHS[mo - 1]} ${y}.csv”</button>
-    ${section("income", "Rendimentos")}${section("expense", "Gastos")}
-    ${rows.length ? "" : '<div class="empty">Nada lançado neste mês.</div>'}
+    ${summarySections(rows)}
     <div class="section-title"><span>Contas no orçamento (${state.accounts.filter((a) => a.in_budget).length})</span>
       <button class="collapser" data-action="toggle-budget-accounts">${state.showBudgetAccounts ? "Ocultar" : "Mostrar"}</button></div>
     ${state.showBudgetAccounts ? `<div class="list">${accounts.map((a) => `<label class="row check">
       <input type="checkbox" data-budget-account="${a.id}" ${a.in_budget ? "checked" : ""}>
       <div class="main"><div class="title">${esc(a.name)}</div>${a.account_group === "archived" ? '<div class="meta">arquivada</div>' : ""}</div></label>`).join("")}</div>` : ""}`, "mais");
+}
+
+// Tela: Relatórios -----------------------------------------------------------------
+// Por enquanto só os de resumo por categoria (config.type = "summary"); os outros
+// relatórios do MoneyWiz aparecem na lista como "em breve".
+
+function reportPeriod(cfg) {
+  const d = new Date();
+  const shift = { last_month: -1, this_month: 0, next_month: 1 }[cfg.period];
+  if (shift === undefined) return { from: cfg.from, to: cfg.to };
+  const first = new Date(d.getFullYear(), d.getMonth() + shift, 1);
+  const from = `${first.getFullYear()}-${pad(first.getMonth() + 1)}-01`;
+  return { from, to: monthEnd(from) };
+}
+
+function periodLabel({ from, to }) {
+  const [y, m] = from.split("-").map(Number);
+  if (from.endsWith("-01") && to === monthEnd(from)) return `${MONTHS[m - 1]} ${y}`;
+  return `${dayLabel(from)} ${from.slice(0, 4)} a ${dayLabel(to)} ${to.slice(0, 4)}`;
+}
+
+async function viewReports() {
+  state.reports = await must(sb.from("reports").select("id,name,config,display_order").order("display_order").order("name"));
+  const ready = state.reports.filter((r) => r.config?.type === "summary");
+  const later = state.reports.filter((r) => r.config?.type !== "summary");
+  render(`<div class="topbar"><button class="back" data-go="#/mais">‹ Mais</button></div>
+    <div class="topbar"><h1>Relatórios</h1></div>
+    <div class="list">${ready.map((r) => `<button class="row" data-go="#/relatorio/${r.id}"><div class="main">
+      <div class="title">${esc(r.name)}</div><div class="meta">${periodLabel(reportPeriod(r.config))}</div></div><span class="chev">›</span></button>`).join("")}</div>
+    <div class="section-title"><span>Em breve (${later.length})</span></div>
+    <div class="list">${later.map((r) => `<div class="row"><div class="main"><div class="title muted">${esc(r.name)}</div></div></div>`).join("")}</div>`, "mais");
+}
+
+async function viewReport(id) {
+  if (!state.reports) state.reports = await must(sb.from("reports").select("id,name,config,display_order"));
+  const r = state.reports.find((x) => x.id === id);
+  if (!r || r.config?.type !== "summary") return go("#/relatorios");
+  const period = reportPeriod(r.config);
+  const rows = summaryRows(await must(sb.rpc("report_summary", {
+    p_from: period.from, p_to: period.to, p_accounts: r.config.accounts,
+    p_categories: r.config.categories, p_scheduled: r.config.scheduled })));
+  state.reportRows = rows;
+  state.reportFile = `${periodLabel(period)}.csv`;
+  render(`<div class="topbar"><button class="back" data-go="#/relatorios">‹ Relatórios</button></div>
+    <div class="topbar"><h1>${esc(r.name)}</h1></div>
+    <div class="meta-line">${periodLabel(period)} · ${r.config.accounts.length} conta${r.config.accounts.length === 1 ? "" : "s"}</div>
+    ${summaryHero(rows, r.config.scheduled && period.to >= today())}
+    ${summarySections(rows)}
+    ${rows.length ? `<button class="more" data-action="report-export">Exportar CSV</button>` : ""}`, "mais");
 }
 
 // Folha: lançamento --------------------------------------------------------------
@@ -751,6 +808,7 @@ document.addEventListener("click", async (ev) => {
       const [y, m] = state.budgetMonth.split("-").map(Number);
       return downloadFile(`${MONTHS[m - 1]} ${y}.csv`, budgetCsv(state.budgetRows));
     }
+    case "report-export": return downloadFile(state.reportFile, budgetCsv(state.reportRows));
     case "toggle-budget-accounts": state.showBudgetAccounts = !state.showBudgetAccounts; return viewBudget();
     case "logout": await sb.auth.signOut(); return;
   }
@@ -804,6 +862,8 @@ function route() {
     case "recentes": return viewRecent();
     case "mais": return viewMore();
     case "orcamento": return viewBudget();
+    case "relatorios": return viewReports();
+    case "relatorio": return viewReport(arg);
     default: return viewAccounts();
   }
 }
