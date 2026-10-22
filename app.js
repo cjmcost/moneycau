@@ -338,13 +338,92 @@ function viewMore() {
       <div class="row"><div class="main"><div class="title">Conectado como</div>
         <div class="meta">${esc(state.session?.user?.email)}</div></div></div>
       <button class="row" data-action="reload"><div class="main"><div class="title">Atualizar dados</div></div></button>
+      <button class="row" data-go="#/orcamento"><div class="main"><div class="title">Exportar para o Orçamento</div>
+        <div class="meta">Resumo do mês em CSV, no formato do MoneyWiz</div></div><span class="chev">›</span></button>
     </div>
     <div class="section-title"><span>Em breve</span></div>
     <div class="list">
       <div class="row"><div class="main"><div class="title">Relatórios</div><div class="meta">Os 24 relatórios do MoneyWiz</div></div></div>
-      <div class="row"><div class="main"><div class="title">Exportar para o Orçamento</div><div class="meta">CSV mensal</div></div></div>
     </div>
     <button class="danger" data-action="logout">Sair</button>`, "mais");
+}
+
+// Tela: Exportar para o Orçamento-Familiar -----------------------------------------
+// Gera o mesmo CSV do "Summary Report" do MoneyWiz, que o dashboard do orçamento importa.
+// O mês e o ano saem do nome do arquivo (ex.: "Outubro 2026.csv").
+
+const MONTHS = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
+const brNumber = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+function budgetCsv(rows) {
+  const q = (v) => `"${String(v).replace(/"/g, '""')}"`;
+  const line = (cells, width) => [...cells, ...Array(width - cells.length).fill("")].map(q).join(",");
+  const out = ["sep=,", line(["Nome", "Saldo atual", "Conta", "Transferências", "Descrição", "Beneficiário", "Categoria", "Data",
+    "Tempo", "Memo", "Valor", "Câmbio", "Número do cheque", "Tags", "Saldo"], 15)];
+  for (const [section, title, total] of [["income", "Rendimentos", "Total de rendimentos"], ["expense", "Gastos", "Despesas totais"]]) {
+    const list = rows.filter((r) => r.section === section);
+    out.push(line([title], 14));
+    list.forEach((r) => out.push(line([r.category, brNumber.format(r.amount), "BRL"], 15)));
+    out.push(line([total, brNumber.format(list.reduce((s, r) => s + r.amount, 0)), "BRL"], 15));
+    out.push(line([], 14));
+  }
+  return "\uFEFF" + out.join("\n") + "\n";
+}
+
+async function downloadFile(name, text) {
+  const file = new File([text], name, { type: "text/csv" });
+  // no iPhone a folha de compartilhar permite salvar em Arquivos ou mandar por AirDrop
+  if (matchMedia("(pointer: coarse)").matches && navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file] }); return; } catch (e) { if (e.name === "AbortError") return; }
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(file);
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+async function viewBudget() {
+  if (!state.budgetMonth) {
+    // padrão: mês anterior até o dia 10, depois o mês atual
+    const d = new Date();
+    if (d.getDate() <= 10) d.setMonth(d.getMonth() - 1, 1);
+    state.budgetMonth = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`;
+  }
+  const m = state.budgetMonth;
+  const [y, mo] = m.split("-").map(Number);
+  const raw = await must(sb.rpc("budget_summary", { p_month: m }));
+  const rows = raw.map((r) => ({ ...r, amount: Number(r.amount) }))
+    .sort((a, b) => a.category.localeCompare(b.category, "pt-BR"));
+  state.budgetRows = rows;
+  const sum = (sec) => rows.filter((r) => r.section === sec).reduce((s, r) => s + r.amount, 0);
+  const inc = sum("income"), exp = sum("expense");
+  const lastDay = addDays(`${y + (mo === 12 ? 1 : 0)}-${pad(mo === 12 ? 1 : mo + 1)}-01`, -1);
+  const forecast = lastDay >= today();
+  const section = (sec, title) => {
+    const list = rows.filter((r) => r.section === sec);
+    return list.length ? `<div class="section-title"><span>${title}</span><span>${money(sum(sec))}</span></div>
+      <div class="list">${list.map((r) => `<div class="row"><div class="main"><div class="title">${esc(r.category)}</div></div>
+        <div class="amount">${money(r.amount)}</div></div>`).join("")}</div>` : "";
+  };
+  const accounts = state.accounts.filter((a) => a.in_budget || a.account_group !== "archived");
+  render(`<div class="topbar"><button class="back" data-go="#/mais">‹ Mais</button></div>
+    <div class="month-nav"><button data-action="budget-month" data-step="-1" aria-label="Mês anterior">‹</button>
+      <h1>${MONTHS[mo - 1]} ${y}</h1>
+      <button data-action="budget-month" data-step="1" aria-label="Próximo mês">›</button></div>
+    <div class="hero"><div class="label">Saldo do mês</div>
+      <div class="value ${signClass(inc - exp)}">${money(inc - exp)}</div>
+      <div class="sub">Receitas ${money(inc)} · Despesas ${money(exp)}</div>
+      ${forecast ? '<div class="sub">Inclui os agendados previstos até o fim do mês.</div>' : ""}</div>
+    <button class="primary" data-action="budget-export" ${rows.length ? "" : "disabled"}>Exportar “${MONTHS[mo - 1]} ${y}.csv”</button>
+    ${section("income", "Rendimentos")}${section("expense", "Gastos")}
+    ${rows.length ? "" : '<div class="empty">Nada lançado neste mês.</div>'}
+    <div class="section-title"><span>Contas no orçamento (${state.accounts.filter((a) => a.in_budget).length})</span>
+      <button class="collapser" data-action="toggle-budget-accounts">${state.showBudgetAccounts ? "Ocultar" : "Mostrar"}</button></div>
+    ${state.showBudgetAccounts ? `<div class="list">${accounts.map((a) => `<label class="row check">
+      <input type="checkbox" data-budget-account="${a.id}" ${a.in_budget ? "checked" : ""}>
+      <div class="main"><div class="title">${esc(a.name)}</div>${a.account_group === "archived" ? '<div class="meta">arquivada</div>' : ""}</div></label>`).join("")}</div>` : ""}`, "mais");
 }
 
 // Folha: lançamento --------------------------------------------------------------
@@ -662,6 +741,17 @@ document.addEventListener("click", async (ev) => {
     case "toggle-archived": state.showArchived = !state.showArchived; return viewAccounts();
     case "toggle-later": state.showLater = !state.showLater; return viewScheduled();
     case "reload": await loadAll(); toast("Dados atualizados"); return route();
+    case "budget-month": {
+      const [y, m] = state.budgetMonth.split("-").map(Number);
+      const d = new Date(y, m - 1 + Number(el.dataset.step), 1);
+      state.budgetMonth = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`;
+      return viewBudget();
+    }
+    case "budget-export": {
+      const [y, m] = state.budgetMonth.split("-").map(Number);
+      return downloadFile(`${MONTHS[m - 1]} ${y}.csv`, budgetCsv(state.budgetRows));
+    }
+    case "toggle-budget-accounts": state.showBudgetAccounts = !state.showBudgetAccounts; return viewBudget();
     case "logout": await sb.auth.signOut(); return;
   }
 });
@@ -682,7 +772,14 @@ document.addEventListener("input", (ev) => {
   }
 });
 
-document.addEventListener("change", (ev) => {
+document.addEventListener("change", async (ev) => {
+  const budgetAcc = ev.target.dataset?.budgetAccount;
+  if (budgetAcc) {
+    const on = ev.target.checked;
+    await must(sb.from("accounts").update({ in_budget: on }).eq("id", budgetAcc));
+    state.accById.get(budgetAcc).in_budget = on;
+    return viewBudget();
+  }
   if (!entry) return;
   if (["account", "toAccount", "repeat"].includes(ev.target.id)) { readEntryFields(); drawEntry(); }
 });
@@ -706,6 +803,7 @@ function route() {
     case "agendados": return viewScheduled();
     case "recentes": return viewRecent();
     case "mais": return viewMore();
+    case "orcamento": return viewBudget();
     default: return viewAccounts();
   }
 }
