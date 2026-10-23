@@ -178,3 +178,15 @@ button { cursor: pointer; }
 .row.sub .amount { color: var(--muted); }
 .sub-rows { border-bottom: 1px solid var(--line); }
 .sub-rows:last-child, .sub-rows .row:last-child, .row:has(+ .sub-rows[hidden]:last-child) { border-bottom: 0; }
+
+/* previsão de saldo */
+.chart { background: var(--surface); border-radius: var(--radius); padding: 12px 12px 4px; margin-bottom: 12px; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { font-size: 10px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.chart .line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.chart .area { fill: var(--accent); opacity: 0.12; }
+.chart .zero { stroke: var(--neg); stroke-dasharray: 4 3; }
+.chart .tick { stroke: var(--line); }
+.forecast .row.future { opacity: 1; }
+.section-title .neg { color: var(--neg); }
+.amount.muted { color: var(--muted); text-decoration: line-through; }

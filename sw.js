@@ -1,6 +1,6 @@
 // Guarda a "casca" do app para abrir rápido e mesmo com internet ruim.
 // Os dados (Supabase) nunca passam pelo cache.
-const CACHE = "moneycau-v5";
+const CACHE = "moneycau-v7";
 const SHELL = [
   "./", "index.html", "styles.css", "app.js", "manifest.webmanifest",
   "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png",

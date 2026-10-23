@@ -21,7 +21,10 @@ const state = {
   catById: new Map(),
   payees: [],
   payeeById: new Map(),
+  tags: [],
+  tagById: new Map(),
   scheduled: [],
+  exceptions: new Map(), // "agendado|data original" -> exceção daquela ocorrência
   showArchived: false,
 };
 
@@ -107,13 +110,15 @@ const ICONS = {
 // Dados ------------------------------------------------------------------------
 
 async function loadAll() {
-  const [accounts, balances, categories, payees] = await Promise.all([
+  const [accounts, balances, categories, payees, tags] = await Promise.all([
     must(sb.from("accounts").select("*").order("display_order")),
     must(sb.from("account_balances").select("*")),
     must(sb.from("categories").select("id,parent_id,name,kind,display_order").order("display_order")),
     must(sb.from("payee_usage").select("id,name,default_category_id,uses,last_used")
       .order("uses", { ascending: false }).range(0, 9999)),
+    must(sb.from("tags").select("id,name").order("name")),
   ]);
+  setTags(tags);
   state.accounts = accounts;
   state.accById = new Map(accounts.map((a) => [a.id, a]));
   state.balances = new Map(balances.map((b) => [b.account_id, b]));
@@ -125,9 +130,25 @@ async function loadAll() {
 }
 
 async function loadScheduled() {
-  state.scheduled = await must(sb.from("scheduled")
-    .select("*, scheduled_splits(category_id, amount)")
-    .eq("disabled", false).order("next_date").range(0, 999));
+  const [scheduled, exceptions] = await Promise.all([
+    must(sb.from("scheduled").select("*, scheduled_splits(category_id, amount), scheduled_tags(tag_id)")
+      .eq("disabled", false).order("next_date").range(0, 999)),
+    must(sb.from("scheduled_exceptions").select("*").range(0, 4999)),
+  ]);
+  state.scheduled = scheduled;
+  state.exceptions = new Map(exceptions.map((e) => [e.scheduled_id + "|" + e.occurrence_date, e]));
+}
+
+function setTags(tags) {
+  state.tags = tags.sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+  state.tagById = new Map(tags.map((t) => [t.id, t]));
+}
+const tagNames = (ids) => (ids || []).map((id) => state.tagById.get(id)?.name).filter(Boolean).join(", ");
+
+// Próxima ocorrência de um agendado, já com a exceção daquela data, se houver.
+function nextOcc(s) {
+  const e = state.exceptions.get(s.id + "|" + s.next_date);
+  return { date: e?.new_date || s.next_date, amount: Number(e?.amount ?? s.amount), changed: !!e };
 }
 
 async function refreshBalances() {
@@ -135,7 +156,7 @@ async function refreshBalances() {
   state.balances = new Map(balances.map((b) => [b.account_id, b]));
 }
 
-const dueCount = () => state.scheduled.filter((s) => s.next_date <= today()).length;
+const dueCount = () => state.scheduled.filter((s) => nextOcc(s).date <= today()).length;
 
 // Estrutura ----------------------------------------------------------------------
 
@@ -198,7 +219,7 @@ function viewAccounts() {
 // Tela: Extrato de uma conta -----------------------------------------------------
 
 const TX_SELECT = "id,kind,date,created_at,amount,description,notes,payee_id,account_id,transfer_peer_id," +
-  "transaction_splits(category_id,amount),peer:transfer_peer_id(account_id,amount)";
+  "transaction_splits(category_id,amount),transaction_tags(tag_id),peer:transfer_peer_id(account_id,amount)";
 const PAGE = 100;
 
 function txTitle(t) {
@@ -218,6 +239,7 @@ function txMeta(t, withAccount) {
   else if (splits.length === 1) parts.push(catLabel(splits[0].category_id));
   const isTransfer = t.kind === "transfer_out" || t.kind === "transfer_in";
   if (t.description && (state.payeeById.get(t.payee_id) || isTransfer)) parts.push(t.description);
+  parts.push(tagNames((t.transaction_tags || []).map((x) => x.tag_id)));
   return parts.filter(Boolean).join(" · ");
 }
 
@@ -331,17 +353,19 @@ function installment(s) {
 const REPEATS = [["none", "Não repete"], ["week:1", "Toda semana"], ["month:1", "Todo mês"], ["month:2", "A cada 2 meses"],
   ["month:3", "A cada 3 meses"], ["month:4", "A cada 4 meses"], ["month:6", "A cada 6 meses"], ["year:1", "Todo ano"]];
 
+const schedTitle = (s) => s.description || state.payeeById.get(s.payee_id)?.name || "(sem descrição)";
+
 function scheduledRow(s) {
   const acc = state.accById.get(s.account_id);
   const to = s.kind === "transfer" ? state.accById.get(s.recipient_account_id) : null;
-  const title = s.description || state.payeeById.get(s.payee_id)?.name || "(sem descrição)";
-  const late = s.next_date < today();
-  const meta = [dayLabel(s.next_date), (acc?.name || "sem conta") + (to ? " → " + to.name : "")].join(" · ");
+  const next = nextOcc(s);
+  const late = next.date < today();
+  const meta = [dayLabel(next.date), (acc?.name || "sem conta") + (to ? " → " + to.name : "")].join(" · ");
   const parc = installment(s);
   return `<div class="row">
-    <div class="main" data-action="edit-sched" data-id="${s.id}"><div class="title">${esc(title)}${parc ? `<span class="badge">${parc}</span>` : ""}${late ? '<span class="badge warn">vencido</span>' : ""}</div>
+    <div class="main" data-action="edit-sched" data-id="${s.id}"><div class="title">${esc(schedTitle(s))}${parc ? `<span class="badge">${parc}</span>` : ""}${next.changed ? '<span class="badge">alterado</span>' : ""}${late ? '<span class="badge warn">vencido</span>' : ""}</div>
       <div class="meta">${esc(meta)}</div></div>
-    <div class="amount ${signClass(s.amount)}">${money(s.amount, s.currency)}</div>
+    <div class="amount ${signClass(next.amount)}">${money(next.amount, s.currency)}</div>
     <div class="actions"><button class="btn-ok" data-action="confirm-sched" data-id="${s.id}">Lançar</button></div>
   </div>`;
 }
@@ -373,17 +397,18 @@ function drawScheduled() {
   }
   const t = today(), in7 = addDays(t, 7), in30 = addDays(t, 30);
   const buckets = [
-    ["Vencidos e hoje", (s) => s.next_date <= t],
-    ["Próximos 7 dias", (s) => s.next_date > t && s.next_date <= in7],
-    ["Próximos 30 dias", (s) => s.next_date > in7 && s.next_date <= in30],
+    ["Vencidos e hoje", (d) => d <= t],
+    ["Próximos 7 dias", (d) => d > t && d <= in7],
+    ["Próximos 30 dias", (d) => d > in7 && d <= in30],
   ];
+  const sorted = [...state.scheduled].sort((a, b) => nextOcc(a).date.localeCompare(nextOcc(b).date));
   let html = "";
   for (const [title, test] of buckets) {
-    const list = state.scheduled.filter(test);
+    const list = sorted.filter((s) => test(nextOcc(s).date));
     if (list.length) html += `<div class="section-title"><span>${title}</span><span>${list.length}</span></div>
       <div class="list">${list.map(scheduledRow).join("")}</div>`;
   }
-  const later = state.scheduled.filter((s) => s.next_date > in30);
+  const later = sorted.filter((s) => nextOcc(s).date > in30);
   html += `<div class="section-title"><span>Depois (${later.length})</span>
     <button class="collapser" data-action="toggle-later">${state.showLater ? "Ocultar" : "Mostrar"}</button></div>`;
   if (state.showLater) html += `<div class="list">${later.map(scheduledRow).join("")}</div>`;
@@ -537,11 +562,11 @@ function periodLabel({ from, to }) {
 
 async function viewReports() {
   state.reports = await must(sb.from("reports").select("id,name,config,display_order").order("display_order").order("name"));
-  const ready = state.reports.filter((r) => r.config?.type === "summary");
-  const later = state.reports.filter((r) => r.config?.type !== "summary");
+  const ready = state.reports.filter((r) => ["summary", "forecast"].includes(r.config?.type));
+  const later = state.reports.filter((r) => !ready.includes(r));
   render(`<div class="topbar"><h1>Relatórios</h1></div>
     <div class="list">${ready.map((r) => `<button class="row" data-go="#/relatorio/${r.id}"><div class="main">
-      <div class="title">${esc(r.name)}</div><div class="meta">${periodLabel(reportPeriod(r.config))}</div></div><span class="chev">›</span></button>`).join("")}</div>
+      <div class="title">${esc(r.name)}</div><div class="meta">${r.config.type === "forecast" ? `Previsão de saldo, ${forecastLabel(r.config)}` : periodLabel(reportPeriod(r.config))}</div></div><span class="chev">›</span></button>`).join("")}</div>
     <div class="section-title"><span>Em breve (${later.length})</span></div>
     <div class="list">${later.map((r) => `<div class="row"><div class="main"><div class="title muted">${esc(r.name)}</div></div></div>`).join("")}</div>`, "relatorios");
 }
@@ -549,6 +574,7 @@ async function viewReports() {
 async function viewReport(id) {
   if (!state.reports) state.reports = await must(sb.from("reports").select("id,name,config,display_order"));
   const r = state.reports.find((x) => x.id === id);
+  if (r?.config?.type === "forecast") return viewForecast(r);
   if (!r || r.config?.type !== "summary") return go("#/relatorios");
   const period = reportPeriod(r.config);
   const rows = groupLines(await must(sb.rpc("report_lines", {
@@ -562,6 +588,162 @@ async function viewReport(id) {
     ${summaryHero(rows, r.config.scheduled && period.to >= today())}
     ${summarySections(rows)}
     ${rows.length ? `<button class="more" data-action="report-export">Exportar CSV</button>` : ""}`, "relatorios");
+}
+
+// Tela: previsão de saldo (os "FCST" do MoneyWiz) -----------------------------------
+// Parte do saldo de hoje das contas do relatório e soma, em ordem de data, os
+// lançamentos futuros e as ocorrências dos agendados (com as exceções) até o fim do
+// mês daqui a config.months meses.
+
+const FORECAST_MONTHS = [3, 6, 12, 24];
+const forecastLabel = (cfg) => `próximos ${cfg.months || 3} meses`;
+function forecastEnd(cfg) {
+  const d = new Date();
+  const m = new Date(d.getFullYear(), d.getMonth() + (cfg.months || 3), 1);
+  return monthEnd(`${m.getFullYear()}-${pad(m.getMonth() + 1)}-01`);
+}
+const yearDay = (iso) => `${dayLabel(iso)} ${iso.slice(0, 4)}`;
+
+function occRow(o, s, amount, running, withAccount) {
+  const isTransfer = s.kind === "transfer";
+  // numa transferência, a linha é da conta de origem (valor com o sinal da série) ou da de destino
+  const mine = !isTransfer || amount === Number(o.amount) ? s.account_id : s.recipient_account_id;
+  const other = isTransfer ? state.accById.get(mine === s.account_id ? s.recipient_account_id : s.account_id)?.name : null;
+  const title = isTransfer ? (amount < 0 ? "→ " : "← ") + (other || "outra conta") : schedTitle(s);
+  const splits = s.scheduled_splits || [];
+  const meta = [dayLabel(o.date), withAccount && state.accById.get(mine)?.name,
+    splits.length > 1 ? `${splits.length} categorias` : splits[0] && catLabel(splits[0].category_id)].filter(Boolean).join(" · ");
+  return `<button class="row" data-action="occ" data-id="${s.id}" data-date="${o.occurrence_date}">
+    <div class="main"><div class="title">${esc(title)}<span class="badge">agendado</span>${o.changed ? '<span class="badge">alterado</span>' : ""}${o.date < today() ? '<span class="badge warn">vencido</span>' : ""}</div>
+      <div class="meta">${esc(meta)}</div></div>
+    <div class="amount ${signClass(amount)}">${money(amount, s.currency)}<small>${money(running)}</small></div>
+  </button>`;
+}
+
+function forecastChart(start, items, to) {
+  const t0 = parseDate(today());
+  const day = (iso) => Math.max(0, Math.round((parseDate(iso) - t0) / 864e5));
+  const days = Math.max(1, day(to));
+  const pts = [[0, start]];
+  items.forEach((it) => pts.push([day(it.date), it.balance]));
+  pts.push([days, items.length ? items[items.length - 1].balance : start]);
+  const vals = pts.map((p) => p[1]);
+  const lo = Math.min(0, ...vals), hi = Math.max(0, ...vals) || 1;
+  const W = 340, H = 130, top = 14;
+  const X = (x) => ((x / days) * W).toFixed(1), Y = (v) => (top + ((hi - v) / (hi - lo)) * (H - top - 4)).toFixed(1);
+  const line = `M0,${Y(start)}` + pts.map(([x, v]) => `H${X(x)}V${Y(v)}`).join("");
+  let ticks = "";
+  for (let m = new Date(t0.getFullYear(), t0.getMonth() + 1, 1); day(`${m.getFullYear()}-${pad(m.getMonth() + 1)}-01`) < days; m.setMonth(m.getMonth() + 1)) {
+    const x = X(day(`${m.getFullYear()}-${pad(m.getMonth() + 1)}-01`));
+    ticks += `<line class="tick" x1="${x}" x2="${x}" y1="${top}" y2="${H}"/><text x="${x}" y="${H + 12}" text-anchor="middle">${MONTHS[m.getMonth()].slice(0, 3).toLowerCase()}</text>`;
+  }
+  return `<div class="chart"><svg viewBox="0 -2 ${W} ${H + 16}" role="img" aria-label="Saldo previsto">
+    ${ticks}
+    ${lo < 0 ? `<line class="zero" x1="0" x2="${W}" y1="${Y(0)}" y2="${Y(0)}"/>` : ""}
+    <path class="area" d="${line}V${Y(lo < 0 ? 0 : lo)}H0Z"/><path class="line" d="${line}"/>
+    <text x="2" y="9">${money(Math.max(...vals))}</text>
+    <text x="2" y="${H - 6}">${money(Math.min(...vals))}</text>
+  </svg></div>`;
+}
+
+async function viewForecast(r) {
+  const accs = r.config.accounts, inSet = new Set(accs), to = forecastEnd(r.config), multi = accs.length > 1;
+  const [txs, occs] = await Promise.all([
+    must(sb.from("transactions").select(TX_SELECT).in("account_id", accs).gt("date", today()).lte("date", to)
+      .order("date").order("created_at").range(0, 4999)),
+    must(sb.rpc("scheduled_occurrences", { p_from: "2000-01-01", p_to: to })),
+  ]);
+  const items = [];
+  for (const t of txs) {
+    txCache.set(t.id, t);
+    items.push({ date: t.date, amount: Number(t.amount), row: (bal) => txRow(t, { withAccount: multi, running: bal, currency: state.accById.get(t.account_id)?.currency }) });
+  }
+  const schedById = new Map(state.scheduled.map((s) => [s.id, s]));
+  for (const o of occs) {
+    const s = schedById.get(o.scheduled_id);
+    if (!s || o.skipped) continue;
+    const legs = [];
+    if (inSet.has(s.account_id)) legs.push(Number(o.amount));
+    if (s.kind === "transfer" && inSet.has(s.recipient_account_id)) legs.push(-Number(o.amount));
+    legs.forEach((amount) => items.push({ date: o.date, amount, row: (bal) => occRow(o, s, amount, bal, multi) }));
+  }
+  // no mesmo dia, entradas antes das saídas (o saldo do dia não "afunda" à toa)
+  items.sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
+  const start = accs.reduce((sum, id) => sum + Number(state.balances.get(id)?.current_balance || 0), 0);
+  let bal = start, min = { bal: start, date: today() };
+  for (const it of items) {
+    bal = Math.round((bal + it.amount) * 100) / 100;
+    it.balance = bal;
+    if (bal < min.bal) min = { bal, date: it.date };
+  }
+  let list = "", month = null, buf = "";
+  items.forEach((it, i) => {
+    if (it.date.slice(0, 7) !== month) {
+      month = it.date.slice(0, 7);
+      const last = items.filter((x) => x.date.slice(0, 7) === month).at(-1);
+      list += `<div class="section-title"><span>${monthLabel(it.date)}</span><span class="${signClass(last.balance)}">${money(last.balance)}</span></div><div class="list">`;
+    }
+    list += it.row(it.balance);
+    if (items[i + 1]?.date.slice(0, 7) !== month) list += "</div>";
+  });
+  const names = accs.map((id) => state.accById.get(id)?.name).filter(Boolean);
+  render(`<div class="topbar"><button class="back" data-go="#/relatorios">‹ Relatórios</button></div>
+    <div class="topbar"><h1>${esc(r.name)}</h1></div>
+    <div class="meta-line">${esc(names.length > 2 ? `${names.length} contas` : names.join(" e "))} · até ${yearDay(to)}</div>
+    <div class="segmented">${FORECAST_MONTHS.map((n) => `<button class="${(r.config.months || 3) === n ? "on" : ""}" data-action="fc-months" data-id="${r.id}" data-n="${n}">${n} meses</button>`).join("")}</div>
+    ${forecastChart(start, items, to)}
+    <div class="hero"><div class="label">Saldo hoje</div>
+      <div class="value ${signClass(start)}">${money(start)}</div>
+      <div class="sub">Em ${yearDay(to)}: <span class="${signClass(bal)}">${money(bal)}</span></div>
+      <div class="sub">Menor saldo: <span class="${signClass(min.bal)}">${money(min.bal)}</span> em ${yearDay(min.date)}</div></div>
+    <div class="forecast">${list || '<div class="empty">Nada previsto neste período.</div>'}</div>
+    <div class="meta-line">Toque num agendado para mudar o valor ou a data só naquela ocorrência.</div>`, "relatorios");
+}
+
+// Folha: só nesta data (exceção de uma ocorrência) ----------------------------------
+
+let occ = null;
+
+function openOccurrence(sid, occDate) {
+  const s = state.scheduled.find((x) => x.id === sid);
+  if (!s) return;
+  const ex = state.exceptions.get(sid + "|" + occDate);
+  entry = null;
+  occ = { s, occDate, ex, cents: Math.round(Math.abs(ex?.amount ?? s.amount) * 100), date: ex?.new_date || occDate };
+  const kind = s.kind;
+  $sheet.innerHTML = `<div class="sheet-backdrop" data-action="close"></div>
+  <div class="sheet" role="dialog" aria-label="Só nesta data">
+    <div class="sheet-head"><button data-action="close">Cancelar</button><h2>Só nesta data</h2>
+      <button class="save" data-action="occ-save">Salvar</button></div>
+    <div class="hero"><div class="label">${esc(schedTitle(s))}</div>
+      <div class="sub">Na série: ${money(Math.abs(s.amount), s.currency)} em ${yearDay(occDate)}</div>
+      ${ex?.skip ? '<div class="sub">Esta data está marcada para ser pulada.</div>' : ""}</div>
+    <input id="occ-amount" class="amount-input ${kind}" inputmode="numeric" autocomplete="off" value="${centsToText(occ.cents)}">
+    <div class="form"><div class="field"><label>Data</label><input id="occ-date" type="date" value="${occ.date}">
+      <div class="hint">Muda só esta ocorrência. As outras seguem a série.</div></div></div>
+    ${ex ? '<button class="more" data-action="occ-reset">Voltar ao que está na série</button>' : ""}
+    <button class="more" data-action="occ-dup">Duplicar nesta data</button>
+    <button class="more" data-action="occ-series">Editar a série inteira</button>
+    ${ex?.skip ? "" : '<button class="danger" data-action="occ-skip">Pular esta data</button>'}
+  </div>`;
+}
+
+async function saveOccurrence(fields) {
+  await must(sb.rpc("set_scheduled_exception", { p_id: occ.s.id, p_occurrence: occ.occDate, ...fields }));
+  closeSheet();
+  await afterChange(true);
+}
+
+// Abre "Novo agendado" com os dados de um existente, sem repetição, numa data.
+function duplicateScheduled(s, date, cents) {
+  const fromIsAccount = !(s.kind === "transfer" && s.amount > 0);
+  const splits = [...(s.scheduled_splits || [])].sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
+  occ = null;
+  openEntry({ kind: s.kind, schedEdit: true, date, cents, repeat: "none", tags: (s.scheduled_tags || []).map((x) => x.tag_id),
+    account: fromIsAccount ? s.account_id : s.recipient_account_id,
+    toAccount: fromIsAccount ? s.recipient_account_id : s.account_id,
+    payee: state.payeeById.get(s.payee_id)?.name || "", description: s.description || "",
+    category: splits[0]?.category_id || null });
 }
 
 // Folha: lançamento --------------------------------------------------------------
@@ -613,12 +795,13 @@ function openEntry(init = {}) {
     total: init.total ?? null,
     done: init.done || 0,
     multiSplit: init.multiSplit || 0,
+    upcoming: init.upcoming || null, // próximas ocorrências, na edição de um agendado
   };
   drawEntry();
   if (!entry.id && !entry.readOnly) setTimeout(() => document.getElementById("amount")?.focus(), 250);
 }
 
-function closeSheet() { $sheet.innerHTML = ""; entry = null; }
+function closeSheet() { $sheet.innerHTML = ""; entry = null; occ = null; }
 
 function drawEntry() {
   const e = entry;
@@ -658,6 +841,8 @@ function drawEntry() {
         <button class="picker ${e.category ? "" : "placeholder"}" data-action="pick-cat" ${lock}>${cat}</button></div>` : ""}
       <div class="field"><label>${e.schedEdit ? "Próxima data" : "Data"}</label><input id="date" type="date" value="${e.date}" ${disabled}></div>
       <div class="field"><label>Descrição</label><input id="description" value="${esc(e.description)}" placeholder="Opcional" ${lock}></div>
+      <div class="field"><label>Tags</label>
+        <button class="picker ${e.tags.length ? "" : "placeholder"}" data-action="pick-tags" ${lock}>${esc(tagNames(e.tags)) || "Opcional"}</button></div>
       ${e.schedEdit ? `<div class="field"><label>Repetição</label>
         <select id="repeat">${repeats.map(([v, l]) => `<option value="${v}" ${v === e.repeat ? "selected" : ""}>${l}</option>`).join("")}</select></div>
       ${e.repeat !== "none" ? `<div class="field"><label>Parcelas</label>
@@ -667,6 +852,12 @@ function drawEntry() {
     </div>
     ${e.id ? '<button class="danger" data-action="delete">Apagar lançamento</button>' : ""}
     ${e.scheduled ? '<button class="danger" data-action="skip-sched">Pular esta ocorrência</button>' : ""}
+    ${e.upcoming?.length ? `<div class="section-title"><span>Próximas datas</span></div>
+      <div class="list">${e.upcoming.map((o) => `<button class="row" data-action="occ" data-id="${e.schedId}" data-date="${o.occurrence_date}">
+        <div class="main"><div class="title">${yearDay(o.date)}${o.skipped ? '<span class="badge warn">pulada</span>' : o.changed ? '<span class="badge">alterado</span>' : ""}</div></div>
+        <div class="amount ${o.skipped ? "muted" : signClass(o.amount)}">${money(o.amount)}</div><span class="chev">›</span></button>`).join("")}</div>
+      <div class="meta-line">Toque numa data para mudar o valor ou a data só nela.</div>` : ""}
+    ${e.schedId ? '<button class="more" data-action="dup-sched">Duplicar agendado</button>' : ""}
     ${e.schedId ? '<button class="danger" data-action="end-sched">Encerrar agendado</button>' : ""}
   </div>`;
 }
@@ -731,6 +922,28 @@ function openCategoryPicker() {
   s.addEventListener("input", () => draw(s.value));
 }
 
+function openTagPicker() {
+  readEntryFields();
+  const draw = (q = "") => {
+    const n = norm(q.trim());
+    const list = state.tags.filter((t) => !n || norm(t.name).includes(n));
+    const exact = state.tags.some((t) => norm(t.name) === n);
+    document.getElementById("tag-list").innerHTML =
+      (n && !exact ? `<button class="row" data-action="new-tag" data-name="${esc(q.trim())}"><div class="main"><div class="title">Criar “${esc(q.trim())}”</div></div></button>` : "") +
+      list.map((t) => `<label class="row check"><input type="checkbox" data-tag="${t.id}" ${entry.tags.includes(t.id) ? "checked" : ""}>
+        <div class="main"><div class="title">${esc(t.name)}</div></div></label>`).join("") ||
+      '<div class="empty">Nenhuma tag ainda. Digite um nome para criar.</div>';
+  };
+  $sheet.innerHTML = `<div class="sheet-backdrop" data-action="back-entry"></div>
+  <div class="sheet"><div class="sheet-head"><button data-action="back-entry">‹ Voltar</button><h2>Tags</h2><span></span></div>
+    <input class="search" id="tag-search" placeholder="Buscar ou criar tag" autocomplete="off">
+    <div class="list" id="tag-list"></div></div>`;
+  draw();
+  const box = document.getElementById("tag-search");
+  box.addEventListener("input", () => draw(box.value));
+  entry.redrawTags = () => draw(box.value);
+}
+
 async function saveEntry() {
   readEntryFields();
   const e = entry;
@@ -746,7 +959,7 @@ async function saveEntry() {
 
   if (e.schedEdit) {
     const [unit, count] = e.repeat === "none" ? ["month", 1] : e.repeat.split(":");
-    await must(sb.rpc("save_scheduled", {
+    const sid = await must(sb.rpc("save_scheduled", {
       p_id: e.schedId, p_kind: e.kind, p_account: e.account, p_amount: e.cents / 100, p_next_date: e.date,
       p_payee_name: e.kind === "transfer" ? null : e.payee || null,
       p_category: e.kind === "transfer" ? null : e.category,
@@ -755,6 +968,8 @@ async function saveEntry() {
       p_repeatable: e.repeat !== "none", p_unit: unit, p_count: Number(count),
       p_total: e.repeat === "none" ? null : e.total,
     }));
+    await must(sb.from("scheduled_tags").delete().eq("scheduled_id", sid));
+    if (e.tags.length) await must(sb.from("scheduled_tags").insert(e.tags.map((tag_id) => ({ scheduled_id: sid, tag_id }))));
   } else if (e.scheduled) {
     await must(sb.rpc("execute_scheduled", { p_id: e.scheduled, p_date: e.date, p_amount: e.cents / 100 }));
   } else {
@@ -813,16 +1028,20 @@ function openScheduled(id) {
   if (!s) return;
   const fromIsAccount = !(s.kind === "transfer" && s.amount > 0);
   const splits = s.scheduled_splits || [];
-  openEntry({ kind: s.kind, scheduled: s.id, date: s.next_date, cents: Math.round(Math.abs(s.amount) * 100),
+  const next = nextOcc(s);
+  openEntry({ kind: s.kind, scheduled: s.id, date: next.date, cents: Math.round(Math.abs(next.amount) * 100),
+    tags: (s.scheduled_tags || []).map((x) => x.tag_id),
     account: fromIsAccount ? s.account_id : s.recipient_account_id,
     toAccount: fromIsAccount ? s.recipient_account_id : s.account_id,
     payee: state.payeeById.get(s.payee_id)?.name || "", description: s.description || "",
     category: splits.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))[0]?.category_id || null });
 }
 
-function editScheduled(id) {
+async function editScheduled(id) {
   const s = state.scheduled.find((x) => x.id === id);
   if (!s) return;
+  const upcoming = s.repeatable ? (await must(sb.rpc("scheduled_occurrences",
+    { p_from: "2000-01-01", p_to: addDays(today(), 3 * 366), p_scheduled: id }))).slice(0, 12) : [];
   const fromIsAccount = !(s.kind === "transfer" && s.amount > 0);
   const splits = s.scheduled_splits || [];
   const { done, total } = schedProgress(s);
@@ -831,7 +1050,8 @@ function editScheduled(id) {
     toAccount: fromIsAccount ? s.recipient_account_id : s.account_id,
     payee: state.payeeById.get(s.payee_id)?.name || "", description: s.description || "",
     category: splits.length === 1 ? splits[0].category_id : null, multiSplit: splits.length > 1 ? splits.length : 0,
-    repeat: s.repeatable ? `${s.interval_unit}:${s.interval_count}` : "none", total, done });
+    repeat: s.repeatable ? `${s.interval_unit}:${s.interval_count}` : "none", total, done, upcoming,
+    tags: (s.scheduled_tags || []).map((x) => x.tag_id) });
 }
 
 // Eventos ----------------------------------------------------------------------
@@ -856,6 +1076,14 @@ document.addEventListener("click", async (ev) => {
       if (entry.category && state.catById.get(entry.category)?.kind !== entry.kind) entry.category = null;
       return drawEntry();
     case "pick-cat": return openCategoryPicker();
+    case "pick-tags": return openTagPicker();
+    case "new-tag": {
+      const tag = await must(sb.from("tags").insert({ name: el.dataset.name }).select("id,name").single());
+      setTags([...state.tags, tag]);
+      entry.tags.push(tag.id);
+      document.getElementById("tag-search").value = "";
+      return entry.redrawTags();
+    }
     case "set-cat": entry.category = id; entry.categoryTouched = true; return drawEntry();
     case "back-entry": return drawEntry();
     case "payee": return choosePayee(state.payeeById.get(id));
@@ -875,6 +1103,27 @@ document.addEventListener("click", async (ev) => {
       await must(sb.rpc("end_scheduled", { p_id: entry.schedId }));
       closeSheet(); toast("Agendado encerrado"); return afterChange(true);
     case "edit-tx": return openTransaction(id);
+    case "occ": return openOccurrence(id, el.dataset.date);
+    case "occ-save": {
+      const date = document.getElementById("occ-date").value || occ.occDate;
+      if (occ.cents <= 0) return toast("Informe o valor");
+      el.disabled = true;
+      try { await saveOccurrence({ p_amount: occ.cents / 100, p_date: date }); } finally { el.disabled = false; }
+      return toast("Alterado só nesta data");
+    }
+    case "occ-reset": await saveOccurrence({}); return toast("Data voltou ao que está na série");
+    case "occ-skip":
+      if (!confirm("Pular esta data? As outras ocorrências continuam.")) return;
+      await saveOccurrence({ p_skip: true }); return toast("Data pulada");
+    case "occ-dup": return duplicateScheduled(occ.s, document.getElementById("occ-date").value || occ.date, occ.cents);
+    case "occ-series": { const sid = occ.s.id; closeSheet(); return editScheduled(sid); }
+    case "dup-sched": { const s = state.scheduled.find((x) => x.id === entry.schedId); return duplicateScheduled(s, s.next_date, entry.cents); }
+    case "fc-months": {
+      const r = state.reports.find((x) => x.id === id);
+      r.config = { ...r.config, months: Number(el.dataset.n) };
+      await must(sb.from("reports").update({ config: r.config }).eq("id", id));
+      return route();
+    }
     case "more": return pageLoader?.();
     case "toggle-archived": state.showArchived = !state.showArchived; return viewAccounts();
     case "toggle-later": state.showLater = !state.showLater; return drawScheduled();
@@ -898,6 +1147,11 @@ document.addEventListener("click", async (ev) => {
 
 document.addEventListener("input", (ev) => {
   const t = ev.target;
+  if (t.id === "occ-amount" && occ) {
+    occ.cents = Math.min(Number(t.value.replace(/\D/g, "") || 0), 99999999999);
+    t.value = centsToText(occ.cents);
+    return;
+  }
   if (!entry) return;
   if (t.id === "amount" || t.id === "toAmount") {
     const cents = Math.min(Number(t.value.replace(/\D/g, "") || 0), 99999999999);
@@ -921,6 +1175,11 @@ document.addEventListener("change", async (ev) => {
     return viewBudget();
   }
   if (!entry) return;
+  const tag = ev.target.dataset?.tag;
+  if (tag) {
+    entry.tags = ev.target.checked ? [...entry.tags, tag] : entry.tags.filter((x) => x !== tag);
+    return;
+  }
   if (["account", "toAccount", "repeat"].includes(ev.target.id)) { readEntryFields(); drawEntry(); }
 });
 
