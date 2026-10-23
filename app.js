@@ -620,31 +620,87 @@ function occRow(o, s, amount, running, withAccount) {
   </button>`;
 }
 
+// "12 mil", "1,2 mi": rótulos curtos do eixo
+function compactMoney(v) {
+  const a = Math.abs(v), f = (n, u) => `${(v / n).toLocaleString("pt-BR", { maximumFractionDigits: a / n < 10 ? 1 : 0 })} ${u}`;
+  return a >= 1e6 ? f(1e6, "mi") : a >= 1e3 ? f(1e3, "mil") : String(Math.round(v));
+}
+
+let fcChart = null; // pontos do gráfico aberto, para o cursor
+
 function forecastChart(start, items, to) {
-  const t0 = parseDate(today());
-  const day = (iso) => Math.max(0, Math.round((parseDate(iso) - t0) / 864e5));
+  const t0 = today();
+  const day = (iso) => Math.max(0, Math.round((parseDate(iso) - parseDate(t0)) / 864e5));
   const days = Math.max(1, day(to));
   const pts = [[0, start]];
   items.forEach((it) => pts.push([day(it.date), it.balance]));
-  pts.push([days, items.length ? items[items.length - 1].balance : start]);
   const vals = pts.map((p) => p[1]);
-  const lo = Math.min(0, ...vals), hi = Math.max(0, ...vals) || 1;
-  const W = 340, H = 130, top = 14;
-  const X = (x) => ((x / days) * W).toFixed(1), Y = (v) => (top + ((hi - v) / (hi - lo)) * (H - top - 4)).toFixed(1);
-  const line = `M0,${Y(start)}` + pts.map(([x, v]) => `H${X(x)}V${Y(v)}`).join("");
-  let ticks = "";
-  for (let m = new Date(t0.getFullYear(), t0.getMonth() + 1, 1); day(`${m.getFullYear()}-${pad(m.getMonth() + 1)}-01`) < days; m.setMonth(m.getMonth() + 1)) {
-    const x = X(day(`${m.getFullYear()}-${pad(m.getMonth() + 1)}-01`));
-    ticks += `<line class="tick" x1="${x}" x2="${x}" y1="${top}" y2="${H}"/><text x="${x}" y="${H + 12}" text-anchor="middle">${MONTHS[m.getMonth()].slice(0, 3).toLowerCase()}</text>`;
+  const vmin = Math.min(...vals), vmax = Math.max(...vals);
+  // o eixo segue os dados; só desce até zero quando o menor saldo já está perto dele
+  let lo = vmin >= 0 && vmin < vmax * 0.25 ? 0 : vmin, hi = vmax;
+  if (hi - lo < 1) { hi += 50; lo -= 50; }
+  const step = (() => { const raw = (hi - lo) / 4, p = 10 ** Math.floor(Math.log10(raw)); return [1, 2, 5, 10].map((k) => k * p).find((s) => s >= raw); })();
+  lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+  const PW = 296, W = 340, H = 150, top = 20, bottom = H - 20;
+  const X = (x) => (x / days) * PW, Y = (v) => top + ((hi - v) / (hi - lo)) * (bottom - top);
+  const f = (n) => n.toFixed(1);
+  let line = `M0,${f(Y(start))}`;
+  pts.slice(1).forEach(([x, v]) => { line += `H${f(X(x))}V${f(Y(v))}`; });
+  line += `H${PW}`;
+  let grid = "";
+  for (let v = lo; v <= hi + step / 2; v += step) {
+    grid += `<line class="${Math.abs(v) < step / 2 ? "zero" : "grid"}" x1="0" x2="${PW}" y1="${f(Y(v))}" y2="${f(Y(v))}"/><text x="${PW + 5}" y="${f(Y(v) + 3)}">${compactMoney(v)}</text>`;
   }
-  return `<div class="chart"><svg viewBox="0 -2 ${W} ${H + 16}" role="img" aria-label="Saldo previsto">
-    ${ticks}
-    ${lo < 0 ? `<line class="zero" x1="0" x2="${W}" y1="${Y(0)}" y2="${Y(0)}"/>` : ""}
-    <path class="area" d="${line}V${Y(lo < 0 ? 0 : lo)}H0Z"/><path class="line" d="${line}"/>
-    <text x="2" y="9">${money(Math.max(...vals))}</text>
-    <text x="2" y="${H - 6}">${money(Math.min(...vals))}</text>
-  </svg></div>`;
+  const nMonths = Math.round(days / 30.4), every = Math.max(1, Math.ceil(nMonths / 8));
+  let ticks = "";
+  for (let m = new Date(parseDate(t0).getFullYear(), parseDate(t0).getMonth() + 1, 1); ; m.setMonth(m.getMonth() + 1)) {
+    const iso = `${m.getFullYear()}-${pad(m.getMonth() + 1)}-01`, x = X(day(iso));
+    if (day(iso) >= days) break;
+    if (m.getMonth() % every) continue;
+    const label = MONTHS[m.getMonth()].slice(0, 3).toLowerCase() + (m.getMonth() === 0 ? `/${String(m.getFullYear()).slice(2)}` : "");
+    ticks += `<line class="tick" x1="${f(x)}" x2="${f(x)}" y1="${top}" y2="${bottom}"/><text x="${f(x)}" y="${H - 4}" text-anchor="middle">${label}</text>`;
+  }
+  // marcas do maior e do menor saldo, com o rótulo para dentro do gráfico
+  const mark = (idx, cls, above) => {
+    const [x, v] = pts[idx], px = X(x), py = Y(v);
+    const anchor = px < PW * 0.25 ? "start" : px > PW * 0.75 ? "end" : "middle";
+    return `<circle class="${cls}" cx="${f(px)}" cy="${f(py)}" r="3.5"/>
+      <text class="mark-label ${cls}" x="${f(px)}" y="${f(above ? py - 7 : py + 14)}" text-anchor="${anchor}">${cls === "min" ? "mín" : "máx"} ${money(v)} · ${(days > 366 ? yearDay : dayLabel)(addDays(t0, x))}</text>`;
+  };
+  const iMin = vals.indexOf(vmin), iMax = vals.indexOf(vmax);
+  fcChart = { t0, days, pts, PW, W, X, Y };
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Saldo previsto">
+    ${grid}${ticks}
+    <path class="area" d="${line}V${f(lo < 0 ? Y(0) : bottom)}H0Z"/><path class="line" d="${line}"/>
+    ${vmax > vmin ? mark(iMax, "max", true) + mark(iMin, "min", false) : ""}
+    <line class="cursor" x1="0" x2="0" y1="${top}" y2="${bottom}" hidden/><circle class="cursor-dot" r="4" hidden/>
+  </svg><div class="chart-tip" hidden></div></div>`;
 }
+
+// Cursor: passar o mouse (ou arrastar o dedo) mostra a data e o saldo do dia.
+function chartCursor(ev) {
+  const svg = ev.target.closest?.(".chart svg");
+  if (!svg || !fcChart) return;
+  const c = fcChart, box = svg.getBoundingClientRect(), scale = box.width / c.W;
+  const d = Math.round(Math.min(1, Math.max(0, (ev.clientX - box.left) / scale / c.PW)) * c.days);
+  let v = c.pts[0][1];
+  for (const [x, val] of c.pts) { if (x > d) break; v = val; }
+  const px = c.X(d), py = c.Y(v);
+  const cur = svg.querySelector(".cursor"), dot = svg.querySelector(".cursor-dot"), tip = svg.parentElement.querySelector(".chart-tip");
+  cur.setAttribute("x1", px); cur.setAttribute("x2", px); dot.setAttribute("cx", px); dot.setAttribute("cy", py);
+  [cur, dot, tip].forEach((el) => el.removeAttribute("hidden"));
+  tip.innerHTML = `<span>${yearDay(addDays(c.t0, d))}</span><b class="${signClass(v)}">${money(v)}</b>`;
+  const left = svg.offsetLeft + px * scale, w = tip.offsetWidth, max = svg.parentElement.clientWidth - w - 4;
+  tip.style.left = `${Math.min(max, Math.max(4, left - w / 2))}px`;
+}
+function chartCursorOff(ev) {
+  const chart = ev.target.closest?.(".chart");
+  if (!chart || chart.contains(ev.relatedTarget)) return;
+  chart.querySelectorAll(".cursor, .cursor-dot, .chart-tip").forEach((el) => el.setAttribute("hidden", ""));
+}
+document.addEventListener("pointermove", chartCursor);
+document.addEventListener("pointerdown", chartCursor);
+document.addEventListener("pointerout", chartCursorOff);
 
 async function viewForecast(r) {
   const accs = r.config.accounts, inSet = new Set(accs), to = forecastEnd(r.config), multi = accs.length > 1;

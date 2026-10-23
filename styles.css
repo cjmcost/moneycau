@@ -180,8 +180,20 @@ button { cursor: pointer; }
 .sub-rows:last-child, .sub-rows .row:last-child, .row:has(+ .sub-rows[hidden]:last-child) { border-bottom: 0; }
 
 /* previsão de saldo */
-.chart { background: var(--surface); border-radius: var(--radius); padding: 12px 12px 4px; margin-bottom: 12px; }
-.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart { position: relative; background: var(--surface); border-radius: var(--radius); padding: 12px 12px 4px; margin-bottom: 12px; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; touch-action: pan-y; cursor: crosshair; }
+.chart .grid { stroke: var(--line); stroke-dasharray: 2 3; }
+.chart circle.max { fill: var(--accent); }
+.chart circle.min { fill: var(--neg); }
+.chart text.mark-label { font-size: 9.5px; font-weight: 600; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; }
+.chart text.mark-label.max { fill: var(--accent); }
+.chart text.mark-label.min { fill: var(--neg); }
+.chart .cursor { stroke: var(--text); stroke-width: 1; opacity: 0.4; }
+.chart .cursor-dot { fill: var(--surface); stroke: var(--accent); stroke-width: 2; }
+.chart-tip { position: absolute; top: 2px; pointer-events: none; background: var(--text); color: var(--surface); border-radius: 8px; padding: 3px 8px; font-size: 12px; white-space: nowrap; display: flex; gap: 6px; font-variant-numeric: tabular-nums; }
+.chart-tip b { color: inherit; }
+.chart-tip b.neg { color: #fdba74; }
+.chart-tip[hidden], .chart [hidden] { display: none; }
 .chart text { font-size: 10px; fill: var(--muted); font-variant-numeric: tabular-nums; }
 .chart .line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
 .chart .area { fill: var(--accent); opacity: 0.12; }
