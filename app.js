@@ -92,6 +92,16 @@ async function must(promise) {
   return data;
 }
 
+// A API devolve no máximo 1.000 linhas por chamada; busca em páginas até acabar.
+async function fetchAll(query) {
+  const rows = [];
+  for (let i = 0; ; i += 1000) {
+    const page = await must(query().range(i, i + 999));
+    rows.push(...page);
+    if (page.length < 1000) return rows;
+  }
+}
+
 function catLabel(id) {
   const c = state.catById.get(id);
   if (!c) return "";
@@ -542,8 +552,8 @@ async function viewBudget() {
 }
 
 // Tela: Relatórios -----------------------------------------------------------------
-// Por enquanto só os de resumo por categoria (config.type = "summary"); os outros
-// relatórios do MoneyWiz aparecem na lista como "em breve".
+// Prontos: resumo por categoria ("summary"), previsão de saldo ("forecast") e faturas de
+// cartão ("cards"). Os outros relatórios do MoneyWiz aparecem na lista como "em breve".
 
 function reportPeriod(cfg) {
   const d = new Date();
@@ -562,11 +572,11 @@ function periodLabel({ from, to }) {
 
 async function viewReports() {
   state.reports = await must(sb.from("reports").select("id,name,config,display_order").order("display_order").order("name"));
-  const ready = state.reports.filter((r) => ["summary", "forecast"].includes(r.config?.type));
+  const ready = state.reports.filter((r) => ["summary", "forecast", "cards"].includes(r.config?.type));
   const later = state.reports.filter((r) => !ready.includes(r));
   render(`<div class="topbar"><h1>Relatórios</h1></div>
     <div class="list">${ready.map((r) => `<button class="row" data-go="#/relatorio/${r.id}"><div class="main">
-      <div class="title">${esc(r.name)}</div><div class="meta">${r.config.type === "forecast" ? `Previsão de saldo, ${forecastLabel(r.config)}` : periodLabel(reportPeriod(r.config))}</div></div><span class="chev">›</span></button>`).join("")}</div>
+      <div class="title">${esc(r.name)}</div><div class="meta">${r.config.type === "forecast" ? `Previsão de saldo, ${forecastLabel(r.config)}` : r.config.type === "cards" ? `Faturas, ${cardPeriodLabel(r.config)}` : periodLabel(reportPeriod(r.config))}</div></div><span class="chev">›</span></button>`).join("")}</div>
     <div class="section-title"><span>Em breve (${later.length})</span></div>
     <div class="list">${later.map((r) => `<div class="row"><div class="main"><div class="title muted">${esc(r.name)}</div></div></div>`).join("")}</div>`, "relatorios");
 }
@@ -575,6 +585,7 @@ async function viewReport(id) {
   if (!state.reports) state.reports = await must(sb.from("reports").select("id,name,config,display_order"));
   const r = state.reports.find((x) => x.id === id);
   if (r?.config?.type === "forecast") return viewForecast(r);
+  if (r?.config?.type === "cards") return viewCards(r);
   if (!r || r.config?.type !== "summary") return go("#/relatorios");
   const period = reportPeriod(r.config);
   const rows = groupLines(await must(sb.rpc("report_lines", {
@@ -616,7 +627,7 @@ function occRow(o, s, amount, running, withAccount) {
   return `<button class="row" data-action="occ" data-id="${s.id}" data-date="${o.occurrence_date}">
     <div class="main"><div class="title">${esc(title)}<span class="badge">agendado</span>${o.changed ? '<span class="badge">alterado</span>' : ""}${o.date < today() ? '<span class="badge warn">vencido</span>' : ""}</div>
       <div class="meta">${esc(meta)}</div></div>
-    <div class="amount ${signClass(amount)}">${money(amount, s.currency)}<small>${money(running)}</small></div>
+    <div class="amount ${signClass(amount)}">${money(amount, s.currency)}${running !== null ? `<small>${money(running)}</small>` : ""}</div>
   </button>`;
 }
 
@@ -680,7 +691,7 @@ function forecastChart(start, items, to) {
 // Cursor: passar o mouse (ou arrastar o dedo) mostra a data e o saldo do dia.
 function chartCursor(ev) {
   const svg = ev.target.closest?.(".chart svg");
-  if (!svg || !fcChart) return;
+  if (!svg || !fcChart || svg.classList.contains("bars")) return;
   const c = fcChart, box = svg.getBoundingClientRect(), scale = box.width / c.W;
   const d = Math.round(Math.min(1, Math.max(0, (ev.clientX - box.left) / scale / c.PW)) * c.days);
   let v = c.pts[0][1];
@@ -705,9 +716,9 @@ document.addEventListener("pointerout", chartCursorOff);
 async function viewForecast(r) {
   const accs = r.config.accounts, inSet = new Set(accs), to = forecastEnd(r.config), multi = accs.length > 1;
   const [txs, occs] = await Promise.all([
-    must(sb.from("transactions").select(TX_SELECT).in("account_id", accs).gt("date", today()).lte("date", to)
-      .order("date").order("created_at").range(0, 4999)),
-    must(sb.rpc("scheduled_occurrences", { p_from: "2000-01-01", p_to: to })),
+    fetchAll(() => sb.from("transactions").select(TX_SELECT).in("account_id", accs).gt("date", today()).lte("date", to)
+      .order("date").order("created_at").order("id")),
+    fetchAll(() => sb.rpc("scheduled_occurrences", { p_from: "2000-01-01", p_to: to })),
   ]);
   const items = [];
   for (const t of txs) {
@@ -754,6 +765,165 @@ async function viewForecast(r) {
       <div class="sub">Menor saldo: <span class="${signClass(min.bal)}">${money(min.bal)}</span> em ${yearDay(min.date)}</div></div>
     <div class="forecast">${list || '<div class="empty">Nada previsto neste período.</div>'}</div>
     <div class="meta-line">Toque num agendado para mudar o valor ou a data só naquela ocorrência.</div>`, "relatorios");
+}
+
+// Tela: faturas de cartão (os relatórios de cartão do MoneyWiz) ------------------------
+// Cada compra é lançada na data de vencimento da fatura, então a fatura de um mês é a
+// soma dos gastos do cartão naquele mês, lançados e agendados. Os pagamentos são
+// transferências para o cartão: ficam fora da soma e só marcam a fatura como paga.
+
+const CARD_PERIODS = ["year", 6, 12, 24];
+const cardPeriodLabel = (cfg) => (cfg.months === "year" ? `ano de ${new Date().getFullYear()}` : `próximos ${cfg.months || 12} meses`);
+const monthKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+const shortMonth = (key) => { const m = Number(key.slice(5)); return MONTHS[m - 1].slice(0, 3).toLowerCase() + (m === 1 ? `/${key.slice(2, 4)}` : ""); };
+
+function cardRange(cfg) {
+  const d = new Date();
+  if (cfg.months === "year") return { from: `${d.getFullYear()}-01-01`, to: `${d.getFullYear()}-12-31` };
+  const last = new Date(d.getFullYear(), d.getMonth() + (cfg.months || 12) - 1, 1);
+  return { from: `${monthKey(d)}-01`, to: monthEnd(`${monthKey(last)}-01`) };
+}
+
+// O dia que mais aparece no mês é o vencimento.
+function dueDate(items) {
+  const count = new Map();
+  items.forEach((it) => count.set(it.date, (count.get(it.date) || 0) + 1));
+  return [...count].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+}
+
+let barChart = null; // meses do gráfico aberto, para a dica
+
+function cardChart(months, accs, selected) {
+  const PW = 296, W = 340, H = 150, top = 12, bottom = H - 20;
+  const hi0 = Math.max(1, ...months.map((m) => m.total));
+  const step = (() => { const raw = hi0 / 4, p = 10 ** Math.floor(Math.log10(raw)); return [1, 2, 5, 10].map((k) => k * p).find((s) => s >= raw); })();
+  const hi = Math.ceil(hi0 / step) * step;
+  const Y = (v) => bottom - (v / hi) * (bottom - top), f = (n) => n.toFixed(1);
+  const band = PW / months.length, bw = Math.min(22, band * 0.62), every = months.length > 12 ? 2 : 1, now = monthKey(new Date());
+  let grid = "";
+  for (let v = 0; v <= hi + step / 2; v += step) {
+    grid += `<line class="${v ? "grid" : "tick"}" x1="0" x2="${PW}" y1="${f(Y(v))}" y2="${f(Y(v))}"/><text x="${PW + 5}" y="${f(Y(v) + 3)}">${compactMoney(v)}</text>`;
+  }
+  let bars = "";
+  months.forEach((m, i) => {
+    const x = i * band + (band - bw) / 2;
+    // segmentos empilhados na ordem das contas do relatório; só o de cima tem a ponta arredondada
+    const segs = accs.map((id, k) => [k, Math.max(0, m.byCard.get(id) || 0)]).filter(([, v]) => v > 0.005);
+    let base = 0;
+    segs.forEach(([k, v], j) => {
+      const y0 = Y(base), y1 = Y(base + v), h = y0 - y1, r = j === segs.length - 1 ? Math.min(4, h, bw / 2) : 0;
+      const gap = j ? 1 : 0; // 2px de fundo entre os segmentos (1px de cada lado)
+      bars += `<path class="bar s${accs.length > 1 ? k + 1 : 0}${m.key < now ? " past" : ""}" d="M${f(x)},${f(y0 - gap)}V${f(y1 + r)}${r ? `Q${f(x)},${f(y1)} ${f(x + r)},${f(y1)}H${f(x + bw - r)}Q${f(x + bw)},${f(y1)} ${f(x + bw)},${f(y1 + r)}` : `H${f(x + bw)}`}V${f(y0 - gap)}Z"/>`;
+      base += v;
+    });
+    if (i % every === 0) bars += `<text x="${f(i * band + band / 2)}" y="${H - 4}" text-anchor="middle"${m.key === now ? ' class="now"' : ""}>${shortMonth(m.key)}</text>`;
+    bars += `<rect class="bar-hit" x="${f(i * band)}" y="${top}" width="${f(band)}" height="${bottom - top}" data-action="card-month" data-month="${m.key}" data-i="${i}"/>`;
+  });
+  barChart = { months, accs };
+  barChart.selected = selected;
+  return `<div class="chart"><svg class="bars" viewBox="0 0 ${W} ${H}" role="img" aria-label="Fatura por mês">${grid}${bars}</svg>
+    <div class="bar-readout">${barReadout(months[selected])}</div></div>`;
+}
+
+// Linha abaixo do gráfico: mês, total e, no consolidado, o valor de cada cartão.
+function barReadout(m) {
+  if (!m) return "";
+  const accs = barChart?.accs || [];
+  return `<span>${monthLabel(m.key + "-01")}</span><b>${money(m.total)}</b>` + (accs.length > 1 ? accs
+    .filter((id) => Math.abs(m.byCard.get(id) || 0) >= 0.005)
+    .map((id) => `<span class="tip-card"><i class="sw s${accs.indexOf(id) + 1}"></i>${esc(cardName(id))} ${money(m.byCard.get(id))}</span>`).join("") : "");
+}
+
+function barHover(ev) {
+  const hit = ev.target.closest?.(".bar-hit"), out = document.querySelector(".bar-readout");
+  if (!out || !barChart) return;
+  const i = hit ? Number(hit.dataset.i) : barChart.selected;
+  document.querySelectorAll(".bar-hit").forEach((h) => h.classList.toggle("on", Number(h.dataset.i) === i));
+  out.innerHTML = barReadout(barChart.months[i]);
+}
+document.addEventListener("pointermove", barHover);
+document.addEventListener("pointerdown", barHover);
+document.addEventListener("pointerout", (ev) => { if (ev.target.closest?.("svg.bars") && !ev.relatedTarget?.closest?.("svg.bars")) barHover({ target: document.body }); });
+
+// Nome curto do cartão para legenda e dica: sem o banco e a bandeira repetidos.
+const cardName = (id) => (state.accById.get(id)?.name || "").replace(/\b(Banco|Mastercard|Visa|Itaú|Itau|Azul)\b/gi, "").replace(/\s+/g, " ").trim()
+  || state.accById.get(id)?.name || "";
+
+async function viewCards(r) {
+  const accs = r.config.accounts, inSet = new Set(accs), { from, to } = cardRange(r.config), multi = accs.length > 1, t0 = today();
+  const [txs, occs] = await Promise.all([
+    fetchAll(() => sb.from("transactions").select(TX_SELECT).in("account_id", accs).gte("date", from).lte("date", to)
+      .order("date").order("created_at").order("id")),
+    fetchAll(() => sb.rpc("scheduled_occurrences", { p_from: from, p_to: to })),
+  ]);
+  const months = [], byKey = new Map();
+  for (const d = parseDate(from); monthKey(d) <= to.slice(0, 7); d.setMonth(d.getMonth() + 1)) {
+    const m = { key: monthKey(d), total: 0, byCard: new Map(), paidBy: new Map(), items: [] };
+    months.push(m); byKey.set(m.key, m);
+  }
+  const add = (date, acc, amount, row) => {
+    const m = byKey.get(date.slice(0, 7));
+    m.total -= amount;
+    m.byCard.set(acc, (m.byCard.get(acc) || 0) - amount);
+    m.items.push({ date, acc, amount, row });
+  };
+  for (const t of txs) {
+    txCache.set(t.id, t);
+    if (t.kind === "transfer_in" || t.kind === "transfer_out") {
+      const m = byKey.get(t.date.slice(0, 7));
+      if (t.date <= t0) m.paidBy.set(t.account_id, (m.paidBy.get(t.account_id) || 0) + Number(t.amount));
+      continue;
+    }
+    add(t.date, t.account_id, Number(t.amount), () => txRow(t, { withAccount: multi, currency: state.accById.get(t.account_id)?.currency }));
+  }
+  const schedById = new Map(state.scheduled.map((s) => [s.id, s]));
+  for (const o of occs) {
+    const s = schedById.get(o.scheduled_id);
+    if (!s || o.skipped || s.kind === "transfer" || !inSet.has(s.account_id)) continue;
+    add(o.date, s.account_id, Number(o.amount), () => occRow(o, s, Number(o.amount), null, multi));
+  }
+  const now = t0.slice(0, 7);
+  for (const m of months) {
+    m.total = Math.round(m.total * 100) / 100;
+    // cada cartão tem o seu vencimento e o seu pagamento
+    m.cards = accs.filter((id) => Math.abs(m.byCard.get(id) || 0) >= 0.005).map((id) => {
+      const total = m.byCard.get(id), due = dueDate(m.items.filter((it) => it.acc === id));
+      const open = total > 0 && (m.paidBy.get(id) || 0) < total - 0.01;
+      return { id, total, due, open, late: open && due < t0 };
+    });
+    const open = m.cards.filter((c) => c.open);
+    m.isPaid = m.total > 0 && !open.length;
+    m.late = open.some((c) => c.late);
+    m.due = (open.length ? open : m.cards).map((c) => c.due).sort()[0];
+    m.items.sort((a, b) => a.date.localeCompare(b.date) || a.amount - b.amount);
+  }
+  const next = months.find((m) => m.key >= now && m.cards.some((c) => c.open));
+  const ahead = months.filter((m) => m.key >= now);
+  const total = ahead.reduce((s, m) => s + m.total, 0);
+  const names = accs.map(cardName);
+  const legend = multi ? `<div class="legend">${accs.map((id, k) => `<span><i class="sw s${k + 1}"></i>${esc(names[k])}</span>`).join("")}</div>` : "";
+  const monthRow = (m) => {
+    const badge = m.isPaid ? '<span class="badge">paga</span>' : m.late ? '<span class="badge warn">em aberto</span>' : "";
+    const count = `${m.items.length} ${m.items.length === 1 ? "item" : "itens"}`;
+    // no consolidado, uma linha por cartão com valor, vencimento e se já foi paga
+    const meta = multi ? [count, ...m.cards.map((c) => `${cardName(c.id)} ${money(c.total)}${c.due ? ` · dia ${Number(c.due.slice(8))}` : ""}${c.late ? " · em aberto" : !c.open && !m.isPaid ? " · paga" : ""}`)]
+      : [[m.due && `vence ${dayLabel(m.due)}`, count].filter(Boolean).join(" · ")];
+    return `<button class="row" data-action="toggle-sub" id="fatura-${m.key}"><div class="main">
+        <div class="title">${monthLabel(m.key + "-01")}${badge}</div>${meta.map((x) => `<div class="meta wrap">${esc(x)}</div>`).join("")}</div>
+        <div class="amount">${money(m.total)}</div><span class="chev">›</span></button>
+      <div class="sub-rows" hidden>${m.items.map((it) => it.row()).join("") || '<div class="empty">Nada nesta fatura.</div>'}</div>`;
+  };
+  render(`<div class="topbar"><button class="back" data-go="#/relatorios">‹ Relatórios</button></div>
+    <div class="topbar"><h1>${esc(r.name)}</h1></div>
+    <div class="meta-line">${esc(names.length > 2 ? `${names.length} cartões` : accs.map((id) => state.accById.get(id)?.name).join(" e "))} · ${cardPeriodLabel(r.config)}</div>
+    <div class="segmented">${CARD_PERIODS.map((n) => `<button class="${(r.config.months || 12) === n ? "on" : ""}" data-action="card-months" data-id="${r.id}" data-n="${n}">${n === "year" ? "Este ano" : `${n} meses`}</button>`).join("")}</div>
+    ${legend}${cardChart(months, accs, Math.max(0, months.indexOf(next ?? months.find((m) => m.key === now))))}
+    <div class="hero"><div class="label">${next ? `Próxima fatura${next.due ? `, vence ${yearDay(next.due)}` : ""}` : "Próxima fatura"}</div>
+      <div class="value">${money(next?.total || 0)}</div>
+      <div class="sub">De ${monthLabel(now + "-01").toLowerCase()} em diante: ${money(total)}, média de ${money(ahead.length ? total / ahead.length : 0)} por mês</div></div>
+    <div class="section-title"><span>Faturas</span></div>
+    <div class="list">${months.map(monthRow).join("")}</div>
+    <div class="meta-line">Toque num mês para ver as compras. Toque num agendado para mudar só aquela parcela.</div>`, "relatorios");
 }
 
 // Folha: só nesta data (exceção de uma ocorrência) ----------------------------------
@@ -1179,6 +1349,17 @@ document.addEventListener("click", async (ev) => {
       r.config = { ...r.config, months: Number(el.dataset.n) };
       await must(sb.from("reports").update({ config: r.config }).eq("id", id));
       return route();
+    }
+    case "card-months": {
+      const r = state.reports.find((x) => x.id === id);
+      r.config = { ...r.config, months: el.dataset.n === "year" ? "year" : Number(el.dataset.n) };
+      await must(sb.from("reports").update({ config: r.config }).eq("id", id));
+      return route();
+    }
+    case "card-month": {
+      const row = document.getElementById("fatura-" + el.dataset.month);
+      if (row?.nextElementSibling.hidden) row.click();
+      return row?.scrollIntoView({ behavior: "smooth", block: "start" });
     }
     case "more": return pageLoader?.();
     case "toggle-archived": state.showArchived = !state.showArchived; return viewAccounts();
