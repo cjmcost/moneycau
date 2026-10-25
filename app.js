@@ -1054,7 +1054,7 @@ function duplicateScheduled(s, date, cents) {
     account: fromIsAccount ? s.account_id : s.recipient_account_id,
     toAccount: fromIsAccount ? s.recipient_account_id : s.account_id,
     payee: state.payeeById.get(s.payee_id)?.name || "", description: s.description || "",
-    category: splits[0]?.category_id || null });
+    category: splits.length === 1 ? splits[0].category_id : null, splits: splits.length > 1 ? splitsFrom(splits, cents) : null });
 }
 
 // Folha: lançamento --------------------------------------------------------------
@@ -1092,7 +1092,7 @@ function openEntry(init = {}) {
     toAccount: init.toAccount || store("mc.last.transfer.to") || null,
     payee: init.payee || "",
     category: init.category || null,
-    categoryTouched: !!init.category || !!init.multiSplit,
+    categoryTouched: !!init.category || !!init.multiSplit || !!init.splits,
     date: init.date || today(),
     description: init.description || "",
     notes: init.notes || "",
@@ -1105,7 +1105,11 @@ function openEntry(init = {}) {
     repeat: init.repeat || "month:1",
     total: init.total ?? null,
     done: init.done || 0,
-    multiSplit: init.multiSplit || 0,
+    multiSplit: init.multiSplit || 0, // agendado dividido sendo lançado: a divisão segue a proporção
+    // divisão em várias categorias: [{ category, cents }] (null = categoria única);
+    // splitIdx é a parte cuja categoria está sendo escolhida
+    splits: init.splits || null,
+    splitIdx: null,
     upcoming: init.upcoming || null, // próximas ocorrências, na edição de um agendado
   };
   drawEntry();
@@ -1121,8 +1125,8 @@ function drawEntry() {
   const fx = e.kind === "transfer" && from && to && from.currency !== to.currency;
   const title = e.scheduled ? "Lançar agendado" : e.schedEdit ? (e.schedId ? "Editar agendado" : "Novo agendado")
     : e.id ? "Editar lançamento" : "Novo lançamento";
-  const cat = e.category ? esc(catLabel(e.category))
-    : e.multiSplit ? `${e.multiSplit} categorias (mantidas)` : "Escolher";
+  const cat = e.category && !e.multiSplit ? esc(catLabel(e.category))
+    : e.multiSplit ? `${e.multiSplit} categorias, na proporção do valor` : "Escolher";
   const repeats = REPEATS.some(([v]) => v === e.repeat) ? REPEATS
     : [...REPEATS, [e.repeat, `A cada ${e.repeat.split(":")[1]} ${{ day: "dias", week: "semanas", month: "meses", year: "anos" }[e.repeat.split(":")[0]]}`]];
   const disabled = e.readOnly ? "disabled" : "";
@@ -1148,8 +1152,8 @@ function drawEntry() {
       ${e.kind !== "transfer" ? `<div class="field"><label>Beneficiário</label>
         <input id="payee" autocomplete="off" value="${esc(e.payee)}" placeholder="Ex.: Pão de Açúcar" ${lock}>
         <div class="suggest" id="suggest" hidden></div></div>
-      <div class="field"><label>Categoria</label>
-        <button class="picker ${e.category ? "" : "placeholder"}" data-action="pick-cat" ${lock}>${cat}</button></div>` : ""}
+      ${e.splits ? splitFields(e, lock) : `<div class="field"><label>Categoria</label>
+        <button class="picker ${e.category || e.multiSplit ? "" : "placeholder"}" data-action="pick-cat" ${lock}>${cat}</button></div>`}` : ""}
       <div class="field"><label>${e.schedEdit ? "Próxima data" : "Data"}</label><input id="date" type="date" value="${e.date}" ${disabled}></div>
       <div class="field"><label>Descrição</label><input id="description" value="${esc(e.description)}" placeholder="Opcional" ${lock}></div>
       <div class="field"><label>Tags</label>
@@ -1171,6 +1175,34 @@ function drawEntry() {
     ${e.schedId ? '<button class="more" data-action="dup-sched">Duplicar agendado</button>' : ""}
     ${e.schedId ? '<button class="danger" data-action="end-sched">Encerrar agendado</button>' : ""}
   </div>`;
+}
+
+// Partes da divisão: categoria, valor e remover; no topo, quanto falta distribuir.
+function splitFields(e, lock) {
+  return `<div class="field split-head"><label>Categorias</label><span id="split-sum">${splitSumText(e)}</span></div>
+    ${e.splits.map((x, i) => `<div class="field split">
+      <button class="picker ${x.category ? "" : "placeholder"}" data-action="pick-cat" data-i="${i}" title="${x.category ? esc(catLabel(x.category)) : ""}" ${lock}>${x.category ? esc(state.catById.get(x.category)?.name) : "Escolher categoria"}</button>
+      <input class="split-amount" data-i="${i}" inputmode="numeric" autocomplete="off" value="${centsToText(x.cents)}" ${lock}>
+      ${lock ? "" : `<button class="split-del" data-action="split-del" data-i="${i}" aria-label="Remover esta categoria">×</button>`}</div>`).join("")}
+    ${lock ? "" : '<div class="field"><button class="picker add" data-action="split-add">+ Adicionar categoria</button></div>'}`;
+}
+const splitRest = (e) => e.cents - e.splits.reduce((sum, x) => sum + x.cents, 0);
+function splitSumText(e) {
+  const rest = splitRest(e);
+  return rest === 0 ? '<span class="ok">Soma confere</span>'
+    : `<span class="warn">${rest > 0 ? "Falta distribuir" : "Passou do valor em"} ${money(Math.abs(rest) / 100)}</span>`;
+}
+
+// Divisão vinda do banco (valores com sinal) em centavos positivos, ajustada a um total:
+// na proporção, com os centavos de arredondamento na maior parte.
+function splitsFrom(rows, totalCents) {
+  const parts = [...rows].sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))
+    .map((r) => ({ category: r.category_id, cents: Math.round(Math.abs(r.amount) * 100) }));
+  const sum = parts.reduce((s, x) => s + x.cents, 0);
+  if (totalCents == null || !sum || sum === totalCents) return parts;
+  parts.forEach((x) => { x.cents = Math.round((x.cents * totalCents) / sum); });
+  parts[0].cents += totalCents - parts.reduce((s, x) => s + x.cents, 0);
+  return parts;
 }
 
 function readEntryFields() {
@@ -1200,7 +1232,7 @@ function payeeSuggestions(text) {
 
 function choosePayee(p) {
   entry.payee = p.name;
-  if (!entry.categoryTouched && p.default_category_id) {
+  if (!entry.categoryTouched && !entry.splits && p.default_category_id) {
     const c = state.catById.get(p.default_category_id);
     if (c && c.kind === entry.kind) entry.category = c.id;
   }
@@ -1227,6 +1259,7 @@ function openCategoryPicker() {
   $sheet.innerHTML = `<div class="sheet-backdrop" data-action="back-entry"></div>
   <div class="sheet"><div class="sheet-head"><button data-action="back-entry">‹ Voltar</button><h2>Categoria</h2><span></span></div>
     <input class="search" id="cat-search" placeholder="Buscar categoria" autocomplete="off">
+    ${entry.splits ? "" : '<button class="more split-start" data-action="split-start">Dividir em várias categorias</button>'}
     <div class="list" id="cat-list"></div></div>`;
   draw();
   const s = document.getElementById("cat-search");
@@ -1265,6 +1298,14 @@ async function saveEntry() {
   const fx = e.kind === "transfer" && state.accById.get(e.account)?.currency !== state.accById.get(e.toAccount)?.currency;
   if (fx && e.toCents <= 0) return toast("Informe o valor recebido");
 
+  let splits = null;
+  if (e.splits && e.kind !== "transfer" && !e.scheduled) {
+    if (e.splits.some((x) => !x.category)) return toast("Escolha a categoria de cada parte");
+    if (e.splits.some((x) => x.cents <= 0)) return toast("Cada categoria precisa de um valor");
+    if (splitRest(e)) return toast(`A soma das categorias precisa dar ${money(e.cents / 100)}`);
+    splits = e.splits.map((x) => ({ category_id: x.category, amount: x.cents / 100 }));
+  }
+
   if (e.schedEdit && e.repeat !== "none" && e.total && e.total <= e.done)
     return toast(`O total precisa ser maior que ${e.done}, que já passaram`);
 
@@ -1277,7 +1318,7 @@ async function saveEntry() {
       p_description: e.description || null,
       p_to_account: e.kind === "transfer" ? e.toAccount : null,
       p_repeatable: e.repeat !== "none", p_unit: unit, p_count: Number(count),
-      p_total: e.repeat === "none" ? null : e.total,
+      p_total: e.repeat === "none" ? null : e.total, p_splits: splits,
     }));
     await must(sb.from("scheduled_tags").delete().eq("scheduled_id", sid));
     if (e.tags.length) await must(sb.from("scheduled_tags").insert(e.tags.map((tag_id) => ({ scheduled_id: sid, tag_id }))));
@@ -1290,7 +1331,7 @@ async function saveEntry() {
       p_category: e.kind === "transfer" ? null : e.category,
       p_description: e.description || null, p_notes: e.notes || null,
       p_to_account: e.kind === "transfer" ? e.toAccount : null,
-      p_to_amount: fx ? e.toCents / 100 : null, p_tags: e.tags,
+      p_to_amount: fx ? e.toCents / 100 : null, p_tags: e.tags, p_splits: splits,
     }));
   }
   store("mc.last." + e.kind, e.account);
@@ -1328,10 +1369,12 @@ async function openTransaction(id) {
   }
   let readOnly = null;
   if (!["expense", "income"].includes(t.kind)) readOnly = "Este tipo de lançamento veio do MoneyWiz e por enquanto só pode ser apagado.";
-  else if (splits.length > 1) readOnly = `Lançamento dividido em ${splits.length} categorias. A edição de divisões chega numa próxima versão; por ora ele só pode ser apagado.`;
+  else if (splits.some((x) => Math.sign(x.amount) !== Math.sign(t.amount)))
+    readOnly = "Esta divisão mistura entradas e saídas (veio do MoneyWiz) e por enquanto só pode ser apagada.";
   openEntry({ ...base, kind: t.kind === "income" ? "income" : "expense", account: t.account_id,
     cents: Math.round(Math.abs(t.amount) * 100), payee: state.payeeById.get(t.payee_id)?.name || "",
-    category: splits[0]?.category_id || null, readOnly });
+    category: splits.length === 1 ? splits[0].category_id : null,
+    splits: splits.length > 1 ? splitsFrom(splits) : null, readOnly });
 }
 
 function openScheduled(id) {
@@ -1345,7 +1388,8 @@ function openScheduled(id) {
     account: fromIsAccount ? s.account_id : s.recipient_account_id,
     toAccount: fromIsAccount ? s.recipient_account_id : s.account_id,
     payee: state.payeeById.get(s.payee_id)?.name || "", description: s.description || "",
-    category: splits.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))[0]?.category_id || null });
+    category: splits.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))[0]?.category_id || null,
+    multiSplit: splits.length > 1 ? splits.length : 0 });
 }
 
 async function editScheduled(id) {
@@ -1360,7 +1404,7 @@ async function editScheduled(id) {
     account: fromIsAccount ? s.account_id : s.recipient_account_id,
     toAccount: fromIsAccount ? s.recipient_account_id : s.account_id,
     payee: state.payeeById.get(s.payee_id)?.name || "", description: s.description || "",
-    category: splits.length === 1 ? splits[0].category_id : null, multiSplit: splits.length > 1 ? splits.length : 0,
+    category: splits.length === 1 ? splits[0].category_id : null, splits: splits.length > 1 ? splitsFrom(splits) : null,
     repeat: s.repeatable ? `${s.interval_unit}:${s.interval_count}` : "none", total, done, upcoming,
     tags: (s.scheduled_tags || []).map((x) => x.tag_id) });
 }
@@ -1385,8 +1429,27 @@ document.addEventListener("click", async (ev) => {
       entry.kind = el.dataset.kind;
       if (!entry.id && !entry.schedId) entry.account = store("mc.last." + entry.kind) || entry.account;
       if (entry.category && state.catById.get(entry.category)?.kind !== entry.kind) entry.category = null;
+      entry.splits?.forEach((x) => { if (x.category && state.catById.get(x.category)?.kind !== entry.kind) x.category = null; });
       return drawEntry();
-    case "pick-cat": return openCategoryPicker();
+    case "pick-cat":
+      entry.splitIdx = el.dataset.i !== undefined ? Number(el.dataset.i) : null;
+      return openCategoryPicker();
+    case "split-start":
+      // a categoria atual vira a primeira parte, com o valor todo; a segunda já pede a categoria
+      entry.splits = [{ category: entry.category, cents: entry.cents }, { category: null, cents: 0 }];
+      entry.category = null; entry.categoryTouched = true; entry.splitIdx = entry.splits[0].category ? 1 : 0;
+      return openCategoryPicker();
+    case "split-add":
+      readEntryFields();
+      entry.splits.push({ category: null, cents: Math.max(0, splitRest(entry)) });
+      entry.splitIdx = entry.splits.length - 1;
+      return openCategoryPicker();
+    case "split-del": {
+      readEntryFields();
+      entry.splits.splice(Number(el.dataset.i), 1);
+      if (entry.splits.length === 1) { entry.category = entry.splits[0].category; entry.splits = null; }
+      return drawEntry();
+    }
     case "pick-tags": return openTagPicker();
     case "new-tag": {
       const tag = await must(sb.from("tags").insert({ name: el.dataset.name }).select("id,name").single());
@@ -1395,8 +1458,12 @@ document.addEventListener("click", async (ev) => {
       document.getElementById("tag-search").value = "";
       return entry.redrawTags();
     }
-    case "set-cat": entry.category = id; entry.categoryTouched = true; return drawEntry();
-    case "back-entry": return drawEntry();
+    case "set-cat":
+      if (entry.splitIdx !== null) entry.splits[entry.splitIdx].category = id;
+      else entry.category = id;
+      entry.categoryTouched = true; entry.splitIdx = null;
+      return drawEntry();
+    case "back-entry": entry.splitIdx = null; return drawEntry();
     case "payee": return choosePayee(state.payeeById.get(id));
     case "delete":
       if (!confirm("Apagar este lançamento?")) return;
@@ -1488,6 +1555,12 @@ document.addEventListener("input", (ev) => {
     const cents = Math.min(Number(t.value.replace(/\D/g, "") || 0), 99999999999);
     entry[t.id === "amount" ? "cents" : "toCents"] = cents;
     t.value = centsToText(cents);
+    if (entry.splits && t.id === "amount") document.getElementById("split-sum").innerHTML = splitSumText(entry);
+  } else if (t.classList.contains("split-amount")) {
+    const cents = Math.min(Number(t.value.replace(/\D/g, "") || 0), 99999999999);
+    entry.splits[Number(t.dataset.i)].cents = cents;
+    t.value = centsToText(cents);
+    document.getElementById("split-sum").innerHTML = splitSumText(entry);
   } else if (t.id === "payee") {
     entry.payee = t.value;
     const box = document.getElementById("suggest");

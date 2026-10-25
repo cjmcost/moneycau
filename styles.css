@@ -244,3 +244,15 @@ button { cursor: pointer; }
 .cal-day.sel .n { background: var(--accent); color: var(--surface); }
 .cal-day:active { background: var(--surface-2); }
 .cal-sum { margin: 0 4px 4px; line-height: 1.6; }
+
+/* divisão em várias categorias */
+.field.split-head { justify-content: space-between; }
+.field.split-head #split-sum { font-size: 14px; font-variant-numeric: tabular-nums; }
+#split-sum .ok { color: var(--pos); }
+#split-sum .warn { color: var(--warn); }
+.field.split { padding-left: 24px; gap: 8px; }
+.field.split .picker { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.field.split .split-amount { flex: 0 0 96px; width: 96px; text-align: right; font-variant-numeric: tabular-nums; border: 0; background: none; padding: 12px 0; outline: none; }
+.split-del { border: 0; background: none; color: var(--muted); font-size: 20px; width: 32px; height: 32px; padding: 0; flex-shrink: 0; }
+.field .picker.add { color: var(--accent); text-align: left; }
+.split-start { margin: 0 0 10px; }
