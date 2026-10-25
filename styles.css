@@ -256,3 +256,12 @@ button { cursor: pointer; }
 .split-del { border: 0; background: none; color: var(--muted); font-size: 20px; width: 32px; height: 32px; padding: 0; flex-shrink: 0; }
 .field .picker.add { color: var(--accent); text-align: left; }
 .split-start { margin: 0 0 10px; }
+
+/* editor de relatórios */
+.field.check { cursor: pointer; justify-content: space-between; }
+.field.check .grow { flex: 1; padding: 12px 0; }
+.field.check input { width: 20px; height: 20px; accent-color: var(--accent); flex: 0 0 auto; }
+.field .chev { margin-left: -4px; }
+.pick-all { margin: 0 0 4px; }
+.row.check.cat-child { padding-left: 40px; }
+.title.strong { font-weight: 600; }

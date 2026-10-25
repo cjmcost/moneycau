@@ -641,7 +641,10 @@ async function viewBudget() {
 // cartão ("cards"). Os outros relatórios do MoneyWiz aparecem na lista como "em breve".
 
 function reportPeriod(cfg) {
-  const d = new Date();
+  const d = new Date(), y = d.getFullYear();
+  if (cfg.period === "this_year") return { from: `${y}-01-01`, to: `${y}-12-31` };
+  if (cfg.period === "last_year") return { from: `${y - 1}-01-01`, to: `${y - 1}-12-31` };
+  if (cfg.period === "last_12") return { from: `${monthKey(new Date(y, d.getMonth() - 11, 1))}-01`, to: today() };
   const shift = { last_month: -1, this_month: 0, next_month: 1 }[cfg.period];
   if (shift === undefined) return { from: cfg.from, to: cfg.to };
   const first = new Date(d.getFullYear(), d.getMonth() + shift, 1);
@@ -652,22 +655,35 @@ function reportPeriod(cfg) {
 function periodLabel({ from, to }) {
   const [y, m] = from.split("-").map(Number);
   if (from.endsWith("-01") && to === monthEnd(from)) return `${MONTHS[m - 1]} ${y}`;
+  if (from.endsWith("-01-01") && to === `${y}-12-31`) return String(y);
   return `${dayLabel(from)} ${from.slice(0, 4)} a ${dayLabel(to)} ${to.slice(0, 4)}`;
 }
 
+const REPORT_TYPES = [["summary", "Resumos por categoria"], ["forecast", "Previsões de saldo"], ["cards", "Faturas de cartão"]];
+const byName = (a, b) => a.name.localeCompare(b.name, "pt-BR", { numeric: true });
+
+async function loadReports() {
+  state.reports = await must(sb.from("reports").select("id,name,config,display_order"));
+}
+
 async function viewReports() {
-  state.reports = await must(sb.from("reports").select("id,name,config,display_order").order("display_order").order("name"));
-  const ready = state.reports.filter((r) => ["summary", "forecast", "cards"].includes(r.config?.type));
-  const later = state.reports.filter((r) => !ready.includes(r));
-  render(`<div class="topbar"><h1>Relatórios</h1></div>
-    <div class="list">${ready.map((r) => `<button class="row" data-go="#/relatorio/${r.id}"><div class="main">
-      <div class="title">${esc(r.name)}</div><div class="meta">${r.config.type === "forecast" ? `Previsão de saldo, ${forecastLabel(r.config)}` : r.config.type === "cards" ? `Faturas, ${cardPeriodLabel(r.config)}` : periodLabel(reportPeriod(r.config))}</div></div><span class="chev">›</span></button>`).join("")}</div>
+  await loadReports();
+  const later = state.reports.filter((r) => !REPORT_TYPES.some(([t]) => t === r.config?.type)).sort(byName);
+  const meta = (r) => r.config.type === "forecast" ? forecastLabel(r.config)
+    : r.config.type === "cards" ? cardPeriodLabel(r.config) : periodLabel(reportPeriod(r.config));
+  render(`<div class="topbar"><h1>Relatórios</h1><button class="back" data-action="report-new">+ Novo</button></div>
+    ${REPORT_TYPES.map(([type, title]) => {
+      const list = state.reports.filter((r) => r.config?.type === type).sort(byName);
+      return list.length ? `<div class="section-title"><span>${title}</span></div>
+        <div class="list">${list.map((r) => `<button class="row" data-go="#/relatorio/${r.id}"><div class="main">
+          <div class="title">${esc(r.name)}</div><div class="meta">${esc(meta(r))}</div></div><span class="chev">›</span></button>`).join("")}</div>` : "";
+    }).join("")}
     <div class="section-title"><span>Em breve (${later.length})</span></div>
     <div class="list">${later.map((r) => `<div class="row"><div class="main"><div class="title muted">${esc(r.name)}</div></div></div>`).join("")}</div>`, "relatorios");
 }
 
 async function viewReport(id) {
-  if (!state.reports) state.reports = await must(sb.from("reports").select("id,name,config,display_order"));
+  if (!state.reports) await loadReports();
   const r = state.reports.find((x) => x.id === id);
   if (r?.config?.type === "forecast") return viewForecast(r);
   if (r?.config?.type === "cards") return viewCards(r);
@@ -679,11 +695,154 @@ async function viewReport(id) {
   state.reportRows = rows;
   state.reportFile = `${periodLabel(period)}.csv`;
   render(`<div class="topbar"><button class="back" data-go="#/relatorios">‹ Relatórios</button></div>
-    <div class="topbar"><h1>${esc(r.name)}</h1></div>
+    <div class="topbar"><h1>${esc(r.name)}</h1><button class="back" data-action="report-edit" data-id="${r.id}">Editar</button></div>
     <div class="meta-line">${periodLabel(period)} · ${r.config.accounts.length} conta${r.config.accounts.length === 1 ? "" : "s"}</div>
     ${summaryHero(rows, r.config.scheduled && period.to >= today())}
     ${summarySections(rows)}
     ${rows.length ? `<button class="more" data-action="report-export">Exportar CSV</button>` : ""}`, "relatorios");
+}
+
+// Folha: editor de relatórios -----------------------------------------------------------
+// Nome, contas e período de qualquer relatório; nos resumos, também categorias e agendados.
+// O tipo só se escolhe ao criar. As listas de contas e categorias abrem em folhas próprias.
+
+const SUMMARY_PERIODS = [["last_month", "Mês passado"], ["this_month", "Mês atual"], ["next_month", "Próximo mês"],
+  ["last_12", "Últimos 12 meses"], ["this_year", "Este ano"], ["last_year", "Ano passado"]];
+let rep = null;
+
+function openReportEditor(r) {
+  const c = r?.config || {};
+  rep = {
+    id: r?.id || null,
+    name: r?.name || "",
+    type: c.type || "summary",
+    accounts: new Set(c.accounts || []),
+    categories: c.categories ? new Set(c.categories) : null, // null = todas
+    period: c.period || "this_month",
+    from: c.from, to: c.to,
+    scheduled: c.scheduled ?? true,
+    months: c.months || (c.type === "cards" ? 12 : 3),
+  };
+  drawReportEditor();
+}
+
+// nas faturas, só cartões (e as contas que o relatório já tiver)
+const repAccounts = () => state.accounts.filter((a) => rep.type !== "cards" || a.type === "credit_card" || rep.accounts.has(a.id));
+
+function drawReportEditor() {
+  const e = rep;
+  const periods = e.period === "fixed" ? [...SUMMARY_PERIODS, ["fixed", `Datas fixas (${periodLabel({ from: e.from, to: e.to })})`]] : SUMMARY_PERIODS;
+  const months = e.type === "cards" ? CARD_PERIODS : FORECAST_MONTHS;
+  const nAcc = repAccounts().filter((a) => e.accounts.has(a.id)).length;
+  const nCat = e.categories ? e.categories.size : null;
+  $sheet.innerHTML = `<div class="sheet-backdrop" data-action="close"></div>
+  <div class="sheet" role="dialog" aria-label="Relatório">
+    <div class="sheet-head"><button data-action="close">Cancelar</button><h2>${e.id ? "Editar relatório" : "Novo relatório"}</h2>
+      <button class="save" data-action="report-save">Salvar</button></div>
+    ${e.id ? "" : `<div class="segmented">${REPORT_TYPES.map(([t]) => `<button class="${e.type === t ? "on" : ""}" data-action="rep-type" data-n="${t}">${{ summary: "Resumo", forecast: "Previsão", cards: "Faturas" }[t]}</button>`).join("")}</div>`}
+    <div class="form">
+      <div class="field"><label>Nome</label><input id="rep-name" value="${esc(e.name)}" placeholder="Ex.: Gastos do mês" autocomplete="off"></div>
+      ${e.type === "summary" ? `<div class="field"><label>Período</label><select id="rep-period">${periods.map(([v, l]) =>
+        `<option value="${v}" ${v === e.period ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      <label class="field check"><span class="grow">Incluir agendados previstos</span><input type="checkbox" id="rep-scheduled" ${e.scheduled ? "checked" : ""}></label>`
+      : `<div class="field"><label>Período</label><select id="rep-months">${months.map((n) =>
+        `<option value="${n}" ${String(e.months) === String(n) ? "selected" : ""}>${n === "year" ? "Este ano" : `${e.type === "cards" ? "" : "Próximos "}${n} meses`}</option>`).join("")}</select></div>`}
+      <div class="field"><label>${e.type === "cards" ? "Cartões" : "Contas"}</label>
+        <button class="picker ${nAcc ? "" : "placeholder"}" data-action="rep-accounts">${nAcc ? `${nAcc} ${nAcc === 1 ? "escolhida" : "escolhidas"}` : "Escolher"}</button><span class="chev">›</span></div>
+      ${e.type === "summary" ? `<div class="field"><label>Categorias</label>
+        <button class="picker" data-action="rep-categories">${nCat === null ? "Todas" : `${nCat} ${nCat === 1 ? "escolhida" : "escolhidas"}`}</button><span class="chev">›</span></div>` : ""}
+    </div>
+    ${e.id ? '<button class="more" data-action="report-dup">Duplicar relatório</button><button class="danger" data-action="report-delete">Apagar relatório</button>' : ""}
+  </div>`;
+}
+
+function readReportFields() {
+  const v = (id) => document.getElementById(id);
+  if (!rep) return;
+  if (v("rep-name")) rep.name = v("rep-name").value;
+  if (v("rep-period")) rep.period = v("rep-period").value;
+  if (v("rep-scheduled")) rep.scheduled = v("rep-scheduled").checked;
+  if (v("rep-months")) rep.months = v("rep-months").value === "year" ? "year" : Number(v("rep-months").value);
+}
+
+// Lista de marcar com "Todas" e "Nenhuma" no topo; rows = [{ id, label, sub, indent }].
+function checkSheet(title, rows, isOn) {
+  $sheet.innerHTML = `<div class="sheet-backdrop" data-action="rep-back"></div>
+  <div class="sheet"><div class="sheet-head"><button data-action="rep-back">‹ Voltar</button><h2>${title}</h2><span></span></div>
+    <div class="actions pick-all"><button class="btn-skip" data-action="rep-all" data-n="1">Todas</button><button class="btn-skip" data-action="rep-all" data-n="0">Nenhuma</button></div>
+    ${rows.map((g) => `${g.section ? `<div class="section-title"><span>${esc(g.section)}</span></div>` : ""}<div class="list">${g.items.map((x) =>
+      `<label class="row check ${x.indent ? "cat-child" : ""}"><input type="checkbox" data-rep-item="${x.id}" ${isOn(x.id) ? "checked" : ""}>
+        <div class="main"><div class="title ${x.bold ? "strong" : ""}">${esc(x.label)}</div>${x.sub ? `<div class="meta">${esc(x.sub)}</div>` : ""}</div></label>`).join("")}</div>`).join("")}
+  </div>`;
+  syncParents();
+}
+
+function openRepAccounts() {
+  readReportFields();
+  rep.sheet = "accounts";
+  const accs = repAccounts();
+  const groups = [...GROUPS, ["Arquivadas", (a) => a.account_group === "archived"]]
+    .map(([section, test]) => ({ section, items: accs.filter(test).map((a) => ({ id: a.id, label: a.name, sub: a.currency !== "BRL" ? a.currency : "" })) }))
+    .filter((g) => g.items.length);
+  checkSheet(rep.type === "cards" ? "Cartões" : "Contas", groups, (id) => rep.accounts.has(id));
+}
+
+function openRepCategories() {
+  readReportFields();
+  rep.sheet = "categories";
+  // nos resumos, "todas" é guardado como nulo; aqui vira a lista inteira marcada
+  if (!rep.categories) rep.categories = new Set(state.categories.map((c) => c.id));
+  const groups = [["income", "Rendimentos"], ["expense", "Gastos"]].map(([kind, section]) => ({ section,
+    items: state.categories.filter((c) => c.kind === kind && !c.parent_id).flatMap((p) => [
+      { id: p.id, label: p.name, bold: state.categories.some((c) => c.parent_id === p.id) },
+      ...state.categories.filter((c) => c.parent_id === p.id).map((c) => ({ id: c.id, label: c.name, indent: true }))]) }));
+  checkSheet("Categorias", groups, (id) => rep.categories.has(id));
+}
+
+// A categoria principal marca e desmarca as subcategorias; com parte delas, fica indeterminada.
+function syncParents() {
+  if (rep?.sheet !== "categories") return;
+  for (const p of state.categories.filter((c) => !c.parent_id)) {
+    const kids = state.categories.filter((c) => c.parent_id === p.id);
+    const box = document.querySelector(`[data-rep-item="${p.id}"]`);
+    if (!box || !kids.length) continue;
+    const on = kids.filter((k) => rep.categories.has(k.id)).length;
+    box.indeterminate = on > 0 && on < kids.length;
+  }
+}
+
+function repToggle(id, on) {
+  const set = rep.sheet === "accounts" ? rep.accounts : rep.categories;
+  const ids = [id, ...(rep.sheet === "categories" ? state.categories.filter((c) => c.parent_id === id).map((c) => c.id) : [])];
+  ids.forEach((x) => (on ? set.add(x) : set.delete(x)));
+  // marcar uma subcategoria marca a principal, para o lançado direto nela também contar
+  const parent = rep.sheet === "categories" && state.catById.get(id)?.parent_id;
+  if (parent && on) set.add(parent);
+  ids.concat(parent || []).forEach((x) => { const b = document.querySelector(`[data-rep-item="${x}"]`); if (b) b.checked = set.has(x); });
+  syncParents();
+}
+
+async function saveReport() {
+  readReportFields();
+  const e = rep, name = e.name.trim();
+  if (!name) return toast("Dê um nome ao relatório");
+  const accounts = repAccounts().filter((a) => e.accounts.has(a.id)).map((a) => a.id);
+  if (!accounts.length) return toast(e.type === "cards" ? "Escolha pelo menos um cartão" : "Escolha pelo menos uma conta");
+  let config;
+  if (e.type === "summary") {
+    const all = !e.categories || e.categories.size === state.categories.length;
+    if (e.categories && !e.categories.size) return toast("Escolha pelo menos uma categoria");
+    config = { type: "summary", period: e.period, accounts, categories: all ? null : [...e.categories], scheduled: e.scheduled };
+    if (e.period === "fixed") Object.assign(config, { from: e.from, to: e.to });
+  } else config = { type: e.type, months: e.months, accounts };
+  const old = state.reports.find((r) => r.id === e.id);
+  const row = e.id
+    ? await must(sb.from("reports").update({ name, config: { ...old?.config, ...config } }).eq("id", e.id).select("id").single())
+    : await must(sb.from("reports").insert({ name, config }).select("id").single());
+  closeSheet();
+  await loadReports();
+  toast("Relatório salvo");
+  go(`#/relatorio/${row.id}`);
 }
 
 // Tela: previsão de saldo (os "FCST" do MoneyWiz) -----------------------------------
@@ -840,7 +999,7 @@ async function viewForecast(r) {
   });
   const names = accs.map((id) => state.accById.get(id)?.name).filter(Boolean);
   render(`<div class="topbar"><button class="back" data-go="#/relatorios">‹ Relatórios</button></div>
-    <div class="topbar"><h1>${esc(r.name)}</h1></div>
+    <div class="topbar"><h1>${esc(r.name)}</h1><button class="back" data-action="report-edit" data-id="${r.id}">Editar</button></div>
     <div class="meta-line">${esc(names.length > 2 ? `${names.length} contas` : names.join(" e "))} · até ${yearDay(to)}</div>
     <div class="segmented">${FORECAST_MONTHS.map((n) => `<button class="${(r.config.months || 3) === n ? "on" : ""}" data-action="fc-months" data-id="${r.id}" data-n="${n}">${n} meses</button>`).join("")}</div>
     ${forecastChart(start, items, to)}
@@ -999,7 +1158,7 @@ async function viewCards(r) {
       <div class="sub-rows" hidden>${m.items.map((it) => it.row()).join("") || '<div class="empty">Nada nesta fatura.</div>'}</div>`;
   };
   render(`<div class="topbar"><button class="back" data-go="#/relatorios">‹ Relatórios</button></div>
-    <div class="topbar"><h1>${esc(r.name)}</h1></div>
+    <div class="topbar"><h1>${esc(r.name)}</h1><button class="back" data-action="report-edit" data-id="${r.id}">Editar</button></div>
     <div class="meta-line">${esc(names.length > 2 ? `${names.length} cartões` : accs.map((id) => state.accById.get(id)?.name).join(" e "))} · ${cardPeriodLabel(r.config)}</div>
     <div class="segmented">${CARD_PERIODS.map((n) => `<button class="${(r.config.months || 12) === n ? "on" : ""}" data-action="card-months" data-id="${r.id}" data-n="${n}">${n === "year" ? "Este ano" : `${n} meses`}</button>`).join("")}</div>
     ${legend}${cardChart(months, accs, Math.max(0, months.indexOf(next ?? months.find((m) => m.key === now))))}
@@ -1116,7 +1275,7 @@ function openEntry(init = {}) {
   if (!entry.id && !entry.readOnly) setTimeout(() => document.getElementById("amount")?.focus(), 250);
 }
 
-function closeSheet() { $sheet.innerHTML = ""; entry = null; occ = null; }
+function closeSheet() { $sheet.innerHTML = ""; entry = null; occ = null; rep = null; }
 
 function drawEntry() {
   const e = entry;
@@ -1511,6 +1670,32 @@ document.addEventListener("click", async (ev) => {
       return drawCalendar();
     case "cal-month": return calMove(Number(el.dataset.step));
     case "cal-today": state.calMonth = today().slice(0, 7); state.calDay = today(); return drawCalendar();
+    case "report-new": return openReportEditor(null);
+    case "report-edit": return openReportEditor(state.reports.find((x) => x.id === id));
+    case "report-save": el.disabled = true; try { await saveReport(); } finally { el.disabled = false; } return;
+    case "rep-type":
+      readReportFields();
+      rep.type = el.dataset.n;
+      rep.months = rep.type === "cards" ? 12 : 3;
+      return drawReportEditor();
+    case "rep-accounts": return openRepAccounts();
+    case "rep-categories": return openRepCategories();
+    case "rep-back": rep.sheet = null; return drawReportEditor();
+    case "rep-all": {
+      const on = el.dataset.n === "1";
+      document.querySelectorAll("[data-rep-item]").forEach((b) => { if (b.checked !== on) repToggle(b.dataset.repItem, on); });
+      return;
+    }
+    case "report-dup":
+      readReportFields();
+      rep = { ...rep, id: null, name: `${rep.name} (cópia)`, accounts: new Set(rep.accounts), categories: rep.categories && new Set(rep.categories) };
+      return drawReportEditor();
+    case "report-delete": {
+      if (!confirm(`Apagar o relatório "${rep.name}"? Os lançamentos não mudam.`)) return;
+      await must(sb.from("reports").delete().eq("id", rep.id));
+      closeSheet(); toast("Relatório apagado");
+      return go("#/relatorios");
+    }
     case "card-months": {
       const r = state.reports.find((x) => x.id === id);
       r.config = { ...r.config, months: el.dataset.n === "year" ? "year" : Number(el.dataset.n) };
@@ -1541,6 +1726,11 @@ document.addEventListener("click", async (ev) => {
     case "toggle-budget-accounts": state.showBudgetAccounts = !state.showBudgetAccounts; return viewBudget();
     case "logout": await sb.auth.signOut(); return;
   }
+});
+
+document.addEventListener("change", (ev) => {
+  const id = ev.target.dataset?.repItem;
+  if (id && rep) repToggle(id, ev.target.checked);
 });
 
 document.addEventListener("input", (ev) => {
