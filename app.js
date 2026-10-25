@@ -124,8 +124,8 @@ async function loadAll() {
     must(sb.from("accounts").select("*").order("display_order")),
     must(sb.from("account_balances").select("*")),
     must(sb.from("categories").select("id,parent_id,name,kind,display_order").order("display_order")),
-    must(sb.from("payee_usage").select("id,name,default_category_id,uses,last_used")
-      .order("uses", { ascending: false }).range(0, 9999)),
+    fetchAll(() => sb.from("payee_usage").select("id,name,default_category_id,uses,last_used")
+      .order("uses", { ascending: false }).order("id")),
     must(sb.from("tags").select("id,name").order("name")),
   ]);
   setTags(tags);
@@ -389,13 +389,17 @@ function schedMatches(s, q) {
 
 function viewScheduled() {
   state.schedQuery ??= "";
+  state.schedMode ??= store("schedMode") === "cal" ? "cal" : "list";
+  const mode = (m, label) => `<button class="${state.schedMode === m ? "on" : ""}" data-action="sched-mode" data-n="${m}">${label}</button>`;
   render(`<div class="topbar"><h1>Agendados</h1><button class="back" data-action="new-sched">+ Novo</button></div>
+    <div class="segmented">${mode("list", "Lista")}${mode("cal", "Calendário")}</div>
     ${searchBox("Buscar agendados", state.schedQuery)}<div id="sched-list"></div>`, "agendados");
   drawScheduled();
   onSearch((v) => { state.schedQuery = v; drawScheduled(); });
 }
 
 function drawScheduled() {
+  if (state.schedMode === "cal") return drawCalendar();
   const $list = document.getElementById("sched-list");
   if (!$list) return;
   const q = state.schedQuery;
@@ -425,6 +429,87 @@ function drawScheduled() {
   if (!state.scheduled.length) html += '<div class="empty">Nenhum agendado ativo.</div>';
   $list.innerHTML = html;
 }
+
+// Calendário dos agendados: o mês em grade, com o saldo de cada dia, e a lista do dia
+// escolhido. Mostra as ocorrências ainda não lançadas (as vencidas ficam na data delas).
+// Com busca, só aparecem os agendados que casam com ela.
+
+const WEEKDAYS = ["D", "S", "T", "Q", "Q", "S", "S"];
+const fmtWeekday = new Intl.DateTimeFormat("pt-BR", { weekday: "long", day: "numeric", month: "long" });
+let calToken = 0; // descarta respostas de um mês que já não está na tela
+
+async function drawCalendar() {
+  const $list = document.getElementById("sched-list");
+  if (!$list) return;
+  const t0 = today();
+  state.calMonth ??= t0.slice(0, 7);
+  state.calDay ??= t0;
+  const first = parseDate(state.calMonth + "-01");
+  const gridFrom = addDays(state.calMonth + "-01", -first.getDay());
+  const gridTo = addDays(gridFrom, 41);
+  const token = ++calToken;
+  const occs = await fetchAll(() => sb.rpc("scheduled_occurrences", { p_from: gridFrom, p_to: gridTo }));
+  if (token !== calToken || !document.getElementById("sched-list")) return;
+  const schedById = new Map(state.scheduled.map((s) => [s.id, s]));
+  const q = state.schedQuery;
+  const byDay = new Map();
+  for (const o of occs) {
+    const s = schedById.get(o.scheduled_id);
+    if (!s || o.skipped || (q && !schedMatches(s, q))) continue;
+    if (!byDay.has(o.date)) byDay.set(o.date, []);
+    byDay.get(o.date).push({ o, s, amount: Number(o.amount) });
+  }
+  // saldo do dia sem as transferências, que só mudam o dinheiro de conta
+  const net = (list) => list.filter((x) => x.s.kind !== "transfer").reduce((sum, x) => sum + x.amount, 0);
+  let cells = "";
+  for (let i = 0; i < 42; i++) {
+    const d = addDays(gridFrom, i), list = byDay.get(d) || [], v = net(list);
+    if (i === 35 && d.slice(0, 7) !== state.calMonth) break; // sexta semana só quando o mês precisa
+    const cls = ["cal-day", d.slice(0, 7) !== state.calMonth && "out", d === t0 && "today", d === state.calDay && "sel",
+      list.length && "has", d < t0 && list.length && "late"].filter(Boolean).join(" ");
+    cells += `<button class="${cls}" data-action="cal-day" data-date="${d}" aria-label="${fmtWeekday.format(parseDate(d))}, ${list.length} agendados">
+      <span class="n">${Number(d.slice(8))}</span>${list.length ? `<span class="v ${signClass(v)}">${Math.abs(v) >= 0.005 ? compactMoney(v) : "•"}</span>` : ""}</button>`;
+  }
+  const inMonth = [...byDay].filter(([d]) => d.slice(0, 7) === state.calMonth).flatMap(([, l]) => l);
+  const flows = inMonth.filter((x) => x.s.kind !== "transfer");
+  const inc = flows.filter((x) => x.amount > 0).reduce((sum, x) => sum + x.amount, 0);
+  const out = flows.filter((x) => x.amount < 0).reduce((sum, x) => sum + x.amount, 0);
+  const dayList = (byDay.get(state.calDay) || []).sort((a, b) => b.amount - a.amount);
+  const [y, m] = state.calMonth.split("-").map(Number);
+  const title = fmtWeekday.format(parseDate(state.calDay));
+  $list.innerHTML = `<div class="month-nav"><button data-action="cal-month" data-step="-1" aria-label="Mês anterior">‹</button>
+      <h1>${MONTHS[m - 1]} ${y}</h1>
+      <button data-action="cal-month" data-step="1" aria-label="Próximo mês">›</button></div>
+    <div class="cal">${WEEKDAYS.map((w) => `<span class="wd">${w}</span>`).join("")}${cells}</div>
+    <div class="meta-line cal-sum">${inMonth.length} ${inMonth.length === 1 ? "agendado" : "agendados"} no mês · entradas <span class="pos">${money(inc)}</span> · saídas <span class="neg">${money(-out)}</span>
+      ${state.calMonth !== t0.slice(0, 7) || state.calDay !== t0 ? ' · <button class="collapser" data-action="cal-today">Hoje</button>' : ""}</div>
+    <div class="section-title"><span>${title[0].toUpperCase() + title.slice(1)}</span>${dayList.length ? `<span>${money(net(dayList))}</span>` : ""}</div>
+    ${dayList.length ? `<div class="list">${dayList.map(({ o, s, amount }) =>
+      // a próxima da série pode ser lançada; as seguintes abrem "Só nesta data"
+      o.occurrence_date === s.next_date ? scheduledRow(s) : occRow(o, s, amount, null, true)).join("")}</div>`
+      : '<div class="empty">Nenhum agendado neste dia.</div>'}`;
+}
+
+function calMove(step) {
+  const [y, m] = state.calMonth.split("-").map(Number);
+  const d = new Date(y, m - 1 + step, 1);
+  state.calMonth = monthKey(d);
+  // o dia escolhido vai junto: hoje, se for o mês atual, ou o dia 1
+  state.calDay = state.calMonth === today().slice(0, 7) ? today() : state.calMonth + "-01";
+  drawCalendar();
+}
+
+// Arrastar o dedo de lado na grade troca o mês.
+let calSwipe = null;
+document.addEventListener("touchstart", (ev) => {
+  calSwipe = ev.target.closest?.(".cal") ? { x: ev.touches[0].clientX, y: ev.touches[0].clientY } : null;
+}, { passive: true });
+document.addEventListener("touchend", (ev) => {
+  if (!calSwipe) return;
+  const dx = ev.changedTouches[0].clientX - calSwipe.x, dy = ev.changedTouches[0].clientY - calSwipe.y;
+  calSwipe = null;
+  if (Math.abs(dx) > 50 && Math.abs(dx) > 2 * Math.abs(dy)) calMove(dx < 0 ? 1 : -1);
+});
 
 // Tela: Mais ---------------------------------------------------------------------
 
@@ -1220,8 +1305,8 @@ async function afterChange(scheduledChanged) {
   const tasks = [refreshBalances()];
   if (scheduledChanged) tasks.push(loadScheduled());
   // um beneficiário novo pode ter sido criado
-  tasks.push(must(sb.from("payee_usage").select("id,name,default_category_id,uses,last_used")
-    .order("uses", { ascending: false }).range(0, 9999)).then((p) => {
+  tasks.push(fetchAll(() => sb.from("payee_usage").select("id,name,default_category_id,uses,last_used")
+    .order("uses", { ascending: false }).order("id")).then((p) => {
     state.payees = p; state.payeeById = new Map(p.map((x) => [x.id, x]));
   }));
   await Promise.all(tasks);
@@ -1350,6 +1435,15 @@ document.addEventListener("click", async (ev) => {
       await must(sb.from("reports").update({ config: r.config }).eq("id", id));
       return route();
     }
+    case "sched-mode":
+      state.schedMode = el.dataset.n; store("schedMode", el.dataset.n);
+      return viewScheduled();
+    case "cal-day":
+      state.calDay = el.dataset.date;
+      if (el.dataset.date.slice(0, 7) !== state.calMonth) state.calMonth = el.dataset.date.slice(0, 7);
+      return drawCalendar();
+    case "cal-month": return calMove(Number(el.dataset.step));
+    case "cal-today": state.calMonth = today().slice(0, 7); state.calDay = today(); return drawCalendar();
     case "card-months": {
       const r = state.reports.find((x) => x.id === id);
       r.config = { ...r.config, months: el.dataset.n === "year" ? "year" : Number(el.dataset.n) };
