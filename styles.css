@@ -103,6 +103,7 @@ button { cursor: pointer; }
 
 .segmented { display: flex; background: var(--surface-2); border-radius: 10px; padding: 2px; margin-bottom: 12px; }
 .segmented button { flex: 1; border: 0; background: none; padding: 7px; border-radius: 8px; font-size: 14px; }
+.sheet .segmented button { padding: 7px 2px; font-size: 13px; white-space: nowrap; }
 .segmented button.on { background: var(--surface); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); font-weight: 600; }
 
 .amount-input { width: 100%; border: 0; background: var(--surface); border-radius: var(--radius); padding: 14px 16px;
@@ -197,6 +198,7 @@ button { cursor: pointer; }
 .chart text { font-size: 10px; fill: var(--muted); font-variant-numeric: tabular-nums; }
 .chart .line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
 .chart .area { fill: var(--accent); opacity: 0.12; }
+.chart .line.proj { stroke-dasharray: 4 3; }
 .chart .zero { stroke: var(--neg); stroke-dasharray: 4 3; }
 .chart .tick { stroke: var(--line); }
 .forecast .row.future { opacity: 1; }

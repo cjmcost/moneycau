@@ -653,7 +653,7 @@ async function viewBudget() {
 
 // Tela: Relatórios -----------------------------------------------------------------
 // Prontos: resumo por categoria ("summary"), previsão de saldo ("forecast") e faturas de
-// cartão ("cards"). Os outros relatórios do MoneyWiz aparecem na lista como "em breve".
+// cartão ("cards"), relatórios por mês ("monthly") e patrimônio ("networth").
 
 function reportPeriod(cfg) {
   const d = new Date(), y = d.getFullYear();
@@ -675,8 +675,8 @@ function periodLabel({ from, to }) {
   return `${dayLabel(from)} ${from.slice(0, 4)} a ${dayLabel(to)} ${to.slice(0, 4)}`;
 }
 
-const REPORT_TYPES = [["summary", "Resumos por categoria"], ["monthly", "Por mês"], ["forecast", "Previsões de saldo"], ["cards", "Faturas de cartão"]];
-const TYPE_SHORT = { summary: "Resumo", monthly: "Por mês", forecast: "Previsão", cards: "Faturas" };
+const REPORT_TYPES = [["summary", "Resumos por categoria"], ["monthly", "Por mês"], ["forecast", "Previsões de saldo"], ["cards", "Faturas de cartão"], ["networth", "Patrimônio"]];
+const TYPE_SHORT = { summary: "Resumo", monthly: "Por mês", forecast: "Previsão", cards: "Faturas", networth: "Patrimônio" };
 const byName = (a, b) => a.name.localeCompare(b.name, "pt-BR", { numeric: true });
 
 async function loadReports() {
@@ -687,7 +687,8 @@ async function viewReports() {
   await loadReports();
   const later = state.reports.filter((r) => !REPORT_TYPES.some(([t]) => t === r.config?.type)).sort(byName);
   const meta = (r) => r.config.type === "forecast" ? forecastLabel(r.config)
-    : r.config.type === "cards" ? cardPeriodLabel(r.config) : periodLabel(reportPeriod(r.config));
+    : r.config.type === "cards" ? cardPeriodLabel(r.config)
+    : r.config.type === "networth" ? networthLabel(r.config) : periodLabel(reportPeriod(r.config));
   render(`<div class="topbar"><h1>Relatórios</h1><button class="back" data-action="report-new">+ Novo</button></div>
     ${REPORT_TYPES.map(([type, title]) => {
       const list = state.reports.filter((r) => r.config?.type === type).sort(byName);
@@ -695,8 +696,8 @@ async function viewReports() {
         <div class="list">${list.map((r) => `<button class="row" data-go="#/relatorio/${r.id}"><div class="main">
           <div class="title">${esc(r.name)}</div><div class="meta">${esc(meta(r))}</div></div><span class="chev">›</span></button>`).join("")}</div>` : "";
     }).join("")}
-    <div class="section-title"><span>Em breve (${later.length})</span></div>
-    <div class="list">${later.map((r) => `<div class="row"><div class="main"><div class="title muted">${esc(r.name)}</div></div></div>`).join("")}</div>`, "relatorios");
+    ${later.length ? `<div class="section-title"><span>Em breve (${later.length})</span></div>
+    <div class="list">${later.map((r) => `<div class="row"><div class="main"><div class="title muted">${esc(r.name)}</div></div></div>`).join("")}</div>` : ""}`, "relatorios");
 }
 
 async function viewReport(id) {
@@ -705,6 +706,7 @@ async function viewReport(id) {
   if (r?.config?.type === "forecast") return viewForecast(r);
   if (r?.config?.type === "cards") return viewCards(r);
   if (r?.config?.type === "monthly") return viewMonthly(r);
+  if (r?.config?.type === "networth") return viewNetWorth(r);
   if (!r || r.config?.type !== "summary") return go("#/relatorios");
   const period = reportPeriod(r.config);
   const rows = groupLines(await must(sb.rpc("report_lines", {
@@ -847,7 +849,9 @@ function drawReportEditor() {
       <div class="field"><label>Nome</label><input id="rep-name" value="${esc(e.name)}" placeholder="Ex.: Gastos do mês" autocomplete="off"></div>
       ${byMonth ? `<div class="field"><label>Mostrar</label><select id="rep-measure">${opts(MONTHLY_MEASURES, e.measure)}</select></div>
       <div class="field"><label>Agrupar por</label><select id="rep-group">${opts(MONTHLY_GROUPS, e.group)}</select></div>` : ""}
-      ${e.type === "summary" || byMonth ? `<div class="field"><label>Período</label><select id="rep-period">${opts(periods, e.period)}</select></div>
+      ${e.type === "networth" ? `<div class="field"><label>De</label><input id="rep-from-year" inputmode="numeric" maxlength="4" autocomplete="off" value="${e.from.slice(0, 4)}"></div>
+      <div class="field"><label>Até</label><input id="rep-to-year" inputmode="numeric" maxlength="4" autocomplete="off" value="${e.to.slice(0, 4)}"></div>`
+      : e.type === "summary" || byMonth ? `<div class="field"><label>Período</label><select id="rep-period">${opts(periods, e.period)}</select></div>
       <label class="field check"><span class="grow">Incluir agendados previstos</span><input type="checkbox" id="rep-scheduled" ${e.scheduled ? "checked" : ""}></label>`
       : `<div class="field"><label>Período</label><select id="rep-months">${months.map((n) =>
         `<option value="${n}" ${String(e.months) === String(n) ? "selected" : ""}>${n === "year" ? "Este ano" : `${e.type === "cards" ? "" : "Próximos "}${n} meses`}</option>`).join("")}</select></div>`}
@@ -872,6 +876,8 @@ function readReportFields() {
   if (v("rep-months")) rep.months = v("rep-months").value === "year" ? "year" : Number(v("rep-months").value);
   if (v("rep-group")) rep.group = v("rep-group").value;
   if (v("rep-measure")) rep.measure = v("rep-measure").value;
+  if (v("rep-from-year")) rep.from = `${v("rep-from-year").value.replace(/\D/g, "")}-01-01`;
+  if (v("rep-to-year")) rep.to = `${v("rep-to-year").value.replace(/\D/g, "")}-12-31`;
   if (v("rep-limit")) rep.limit = Number(v("rep-limit").value.replace(/\D/g, "")) / 100 || null;
 }
 
@@ -958,6 +964,10 @@ async function saveReport() {
       categories: all ? null : [...e.categories], tags: allTags ? null : [...e.tags] };
     if (e.type === "monthly") Object.assign(config, { group: e.group, measure: e.measure, limit: e.limit || null });
     if (e.period === "fixed") Object.assign(config, { from: e.from, to: e.to });
+  } else if (e.type === "networth") {
+    const y0 = Number(e.from.slice(0, 4)), y1 = Number(e.to.slice(0, 4));
+    if (!(y0 >= 2000 && y1 >= y0 && y1 <= 2100)) return toast("Confira os anos do período");
+    config = { type: e.type, from: e.from, to: e.to, accounts };
   } else config = { type: e.type, months: e.months, accounts };
   const old = state.reports.find((r) => r.id === e.id);
   const row = e.id
@@ -1061,6 +1071,7 @@ function chartCursor(ev) {
   const svg = ev.target.closest?.(".chart svg");
   if (!svg || !fcChart || svg.classList.contains("bars")) return;
   const c = fcChart, box = svg.getBoundingClientRect(), scale = box.width / c.W;
+  if (c.monthly) return monthCursor(svg, c, scale, (ev.clientX - box.left) / scale);
   const d = Math.round(Math.min(1, Math.max(0, (ev.clientX - box.left) / scale / c.PW)) * c.days);
   let v = c.pts[0][1];
   for (const [x, val] of c.pts) { if (x > d) break; v = val; }
@@ -1069,6 +1080,17 @@ function chartCursor(ev) {
   cur.setAttribute("x1", px); cur.setAttribute("x2", px); dot.setAttribute("cx", px); dot.setAttribute("cy", py);
   [cur, dot, tip].forEach((el) => el.removeAttribute("hidden"));
   tip.innerHTML = `<span>${yearDay(addDays(c.t0, d))}</span><b class="${signClass(v)}">${money(v)}</b>`;
+  const left = svg.offsetLeft + px * scale, w = tip.offsetWidth, max = svg.parentElement.clientWidth - w - 4;
+  tip.style.left = `${Math.min(max, Math.max(4, left - w / 2))}px`;
+}
+// No patrimônio, o cursor anda de mês em mês.
+function monthCursor(svg, c, scale, x) {
+  const i = Math.round(Math.min(1, Math.max(0, x / c.PW)) * (c.n - 1)), r = c.rows[i];
+  const px = c.X(i), py = c.Y(r.balance);
+  const cur = svg.querySelector(".cursor"), dot = svg.querySelector(".cursor-dot"), tip = svg.parentElement.querySelector(".chart-tip");
+  cur.setAttribute("x1", px); cur.setAttribute("x2", px); dot.setAttribute("cx", px); dot.setAttribute("cy", py);
+  [cur, dot, tip].forEach((el) => el.removeAttribute("hidden"));
+  tip.innerHTML = `<span>${shortMonth(r.month)}${r.forecast ? " · previsto" : ""}</span><b class="${signClass(r.balance)}">${money(r.balance)}</b>`;
   const left = svg.offsetLeft + px * scale, w = tip.offsetWidth, max = svg.parentElement.clientWidth - w - 4;
   tip.style.left = `${Math.min(max, Math.max(4, left - w / 2))}px`;
 }
@@ -1133,6 +1155,92 @@ async function viewForecast(r) {
       <div class="sub">Menor saldo: <span class="${signClass(min.bal)}">${money(min.bal)}</span> em ${yearDay(min.date)}</div></div>
     <div class="forecast">${list || '<div class="empty">Nada previsto neste período.</div>'}</div>
     <div class="meta-line">Toque num agendado para mudar o valor ou a data só naquela ocorrência.</div>`, "relatorios");
+}
+
+// Tela: patrimônio (o "Net Worth 65 anos" do MoneyWiz) -------------------------------
+// Saldo somado das contas em reais no fim de cada mês, de config.from a config.to. Até o
+// mês passado é o realizado; daí em diante, a previsão com os lançamentos futuros e os
+// agendados. Não há rendimento nem inflação na projeção, só o que está agendado.
+
+const shortMonth = (iso) => `${MONTHS[Number(iso.slice(5, 7)) - 1].slice(0, 3).toLowerCase()} ${iso.slice(0, 4)}`;
+const networthLabel = (cfg) => `${cfg.from.slice(0, 4)} a ${cfg.to.slice(0, 4)}`;
+
+function netWorthChart(rows) {
+  const n = rows.length, vals = rows.map((r) => r.balance);
+  const vmin = Math.min(...vals), vmax = Math.max(...vals);
+  let lo = vmin >= 0 && vmin < vmax * 0.25 ? 0 : vmin, hi = vmax;
+  if (hi - lo < 1) { hi += 50; lo -= 50; }
+  const step = (() => { const raw = (hi - lo) / 4, p = 10 ** Math.floor(Math.log10(raw)); return [1, 2, 5, 10].map((k) => k * p).find((s) => s >= raw); })();
+  lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+  const PW = 296, W = 340, H = 150, top = 20, bottom = H - 20;
+  const X = (i) => (i / Math.max(1, n - 1)) * PW, Y = (v) => top + ((hi - v) / (hi - lo)) * (bottom - top);
+  const f = (x) => x.toFixed(1);
+  const path = (from, to) => rows.slice(from, to + 1).map((r, k) => `${k ? "L" : "M"}${f(X(from + k))},${f(Y(r.balance))}`).join("");
+  // o realizado vai até o último mês fechado; a linha prevista sai dele
+  const now = rows.findIndex((r) => r.forecast), past = now < 0 ? n - 1 : Math.max(0, now - 1);
+  let grid = "";
+  for (let v = lo; v <= hi + step / 2; v += step) {
+    grid += `<line class="${Math.abs(v) < step / 2 ? "zero" : "grid"}" x1="0" x2="${PW}" y1="${f(Y(v))}" y2="${f(Y(v))}"/><text x="${PW + 5}" y="${f(Y(v) + 3)}">${compactMoney(v)}</text>`;
+  }
+  const years = rows.filter((r) => r.month.endsWith("-01-01")), every = Math.max(1, Math.ceil(years.length / 6));
+  let ticks = "";
+  years.forEach((r, k) => {
+    if (k % every) return;
+    const x = X(rows.indexOf(r));
+    ticks += `<line class="tick" x1="${f(x)}" x2="${f(x)}" y1="${top}" y2="${bottom}"/><text x="${f(x)}" y="${H - 4}" text-anchor="middle">${r.month.slice(0, 4)}</text>`;
+  });
+  const mark = (i, cls, above) => {
+    const px = X(i), py = Y(rows[i].balance);
+    above = above || py + 14 > bottom - 4; // perto do eixo, o rótulo sobe para não cobrir os anos
+    const anchor = px < PW * 0.25 ? "start" : px > PW * 0.75 ? "end" : "middle";
+    return `<circle class="${cls}" cx="${f(px)}" cy="${f(py)}" r="3.5"/>
+      <text class="mark-label ${cls}" x="${f(px)}" y="${f(above ? py - 7 : py + 14)}" text-anchor="${anchor}">${cls === "min" ? "mín" : "máx"} ${compactMoney(rows[i].balance)} · ${shortMonth(rows[i].month)}</text>`;
+  };
+  fcChart = { monthly: true, rows, n, PW, W, X, Y };
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Patrimônio por mês">
+    ${grid}${ticks}
+    <path class="area" d="${path(0, n - 1)}V${f(lo < 0 ? Y(0) : bottom)}H0Z"/>
+    <path class="line" d="${path(0, past)}"/>${now >= 0 ? `<path class="line proj" d="${path(past, n - 1)}"/>
+    <text class="now" x="${f(X(past))}" y="${top - 6}" text-anchor="middle">hoje</text>` : ""}
+    ${vmax > vmin ? mark(vals.indexOf(vmax), "max", true) + mark(vals.indexOf(vmin), "min", false) : ""}
+    <line class="cursor" x1="0" x2="0" y1="${top}" y2="${bottom}" hidden/><circle class="cursor-dot" r="4" hidden/>
+  </svg><div class="chart-tip" hidden></div></div>`;
+}
+
+async function viewNetWorth(r) {
+  const cfg = r.config, accs = cfg.accounts || [];
+  // um mês antes do início, para a variação do primeiro ano
+  const before = new Date(Number(cfg.from.slice(0, 4)), Number(cfg.from.slice(5, 7)) - 2, 1);
+  const data = (await must(sb.rpc("net_worth_monthly", { p_accounts: accs, p_from: `${monthKey(before)}-01`, p_to: cfg.to })))
+    .map((x) => ({ month: x.month, balance: Number(x.balance), forecast: x.forecast }));
+  const base = data.shift(), rows = data;
+  const brl = accs.map((id) => state.accById.get(id)).filter((a) => a && a.currency === "BRL");
+  const foreign = accs.length - brl.length;
+  const now = brl.reduce((sum, a) => sum + Number(state.balances.get(a.id)?.current_balance || 0), 0);
+  const last = rows.at(-1);
+  // um ano por linha: saldo no fim do ano e quanto mudou desde o fim do anterior
+  const years = [];
+  rows.forEach((x) => { if (x.month.endsWith("-12-01") || x === last) years.push(x); });
+  let prev = base.balance;
+  const yearRows = years.map((x) => {
+    const delta = x.balance - prev, y = x.month.slice(0, 4), started = rows.find((m) => m.month.startsWith(y));
+    prev = x.balance;
+    const status = !x.forecast ? "" : started.forecast ? "previsto" : "parte prevista";
+    return `<div class="row"><div class="main"><div class="title">${y}${x.month.endsWith("-12-01") ? "" : ` (até ${shortMonth(x.month)})`}${status ? `<span class="badge">${status}</span>` : ""}</div>
+      <div class="meta"><span class="${signClass(delta)}">${delta >= 0 ? "+" : ""}${money(delta)}</span> no ano</div></div>
+      <div class="amount ${signClass(x.balance)}">${money(x.balance)}</div></div>`;
+  }).reverse();
+  render(`<div class="topbar"><button class="back" data-go="#/relatorios">‹ Relatórios</button></div>
+    <div class="topbar"><h1>${esc(r.name)}</h1><button class="back" data-action="report-edit" data-id="${r.id}">Editar</button></div>
+    <div class="meta-line">${brl.length} ${brl.length === 1 ? "conta" : "contas"} em reais · ${shortMonth(cfg.from)} a ${shortMonth(last.month)}</div>
+    ${netWorthChart(rows)}
+    <div class="hero"><div class="label">Patrimônio hoje</div>
+      <div class="value ${signClass(now)}">${money(now)}</div>
+      <div class="sub">Em ${shortMonth(last.month)}: <span class="${signClass(last.balance)}">${money(last.balance)}</span>${last.forecast ? " (previsto)" : ""}</div>
+      <div class="sub">No início de ${shortMonth(cfg.from)}: ${money(base.balance)}</div></div>
+    <div class="section-title"><span>Fim de cada ano</span></div>
+    <div class="list">${yearRows.join("")}</div>
+    <div class="meta-line">A previsão soma os lançamentos futuros e os agendados. Rendimento dos investimentos e inflação não entram.${foreign ? ` ${foreign} ${foreign === 1 ? "conta em outra moeda fica" : "contas em outra moeda ficam"} de fora.` : ""}</div>`, "relatorios");
 }
 
 // Tela: faturas de cartão (os relatórios de cartão do MoneyWiz) ------------------------
@@ -1938,8 +2046,14 @@ document.addEventListener("click", async (ev) => {
       readReportFields();
       rep.type = el.dataset.n;
       rep.months = rep.type === "cards" ? 12 : 3;
-      // relatório novo: resumos e "por mês" começam com todas as contas; previsão e faturas, sem nenhuma
-      rep.accounts = new Set(["summary", "monthly"].includes(rep.type) ? state.accounts.map((a) => a.id) : []);
+      // relatório novo: resumos e "por mês" começam com todas as contas; patrimônio, com as que
+      // contam no patrimônio; previsão e faturas, sem nenhuma
+      rep.accounts = new Set(["summary", "monthly"].includes(rep.type) ? state.accounts.map((a) => a.id)
+        : rep.type === "networth" ? state.accounts.filter((a) => a.include_in_net_worth).map((a) => a.id) : []);
+      if (rep.type === "networth") {
+        const y = new Date().getFullYear();
+        Object.assign(rep, { from: `${y - 2}-01-01`, to: `${y + 15}-12-31` });
+      }
       if (rep.type === "monthly" && !MONTHLY_PERIODS.some(([v]) => v === rep.period)) rep.period = "last_12";
       if (rep.type === "summary" && !SUMMARY_PERIODS.some(([v]) => v === rep.period)) rep.period = "this_month";
       return drawReportEditor();
