@@ -204,9 +204,11 @@ button { cursor: pointer; }
 .amount.muted { color: var(--muted); text-decoration: line-through; }
 
 /* faturas de cartão: cores dos cartões na ordem do relatório (paleta categórica validada) */
-:root { --card-1: #2a78d6; --card-2: #eb6834; --card-3: #1baf7a; --card-4: #eda100; }
+:root { --card-1: #2a78d6; --card-2: #eb6834; --card-3: #1baf7a; --card-4: #eda100;
+  --card-5: #e87ba4; --card-6: #008300; --card-7: #6250d6; --card-8: #e34948; --card-other: #a1a1a8; }
 @media (prefers-color-scheme: dark) {
-  :root { --card-1: #3987e5; --card-2: #d95926; --card-3: #199e70; --card-4: #c98500; }
+  :root { --card-1: #3987e5; --card-2: #d95926; --card-3: #199e70; --card-4: #c98500;
+    --card-5: #d55181; --card-6: #008300; --card-7: #9085e9; --card-8: #e66767; --card-other: #6b6b72; }
 }
 .chart .bar { fill: var(--accent); stroke: var(--surface); stroke-width: 0; }
 .chart .bar.s1 { fill: var(--card-1); } .chart .bar.s2 { fill: var(--card-2); }
@@ -265,3 +267,22 @@ button { cursor: pointer; }
 .pick-all { margin: 0 0 4px; }
 .row.check.cat-child { padding-left: 40px; }
 .title.strong { font-weight: 600; }
+
+/* relatórios por mês: mais séries, "Outros" e o teto */
+.chart .bar.s5 { fill: var(--card-5); } .chart .bar.s6 { fill: var(--card-6); }
+.chart .bar.s7 { fill: var(--card-7); } .chart .bar.s8 { fill: var(--card-8); }
+.chart .bar.so { fill: var(--card-other); }
+.sw.s5 { background: var(--card-5); } .sw.s6 { background: var(--card-6); }
+.sw.s7 { background: var(--card-7); } .sw.s8 { background: var(--card-8); }
+.sw.so { background: var(--card-other); }
+.chart .limit { stroke: var(--neg); stroke-width: 1.2; stroke-dasharray: 5 3; }
+.chart text.year { font-size: 9px; font-weight: 600; }
+.sw-limit { display: inline-block; width: 14px; height: 0; border-top: 2px dashed var(--neg); }
+.row .meta.warn-text { color: var(--neg); }
+
+/* conferência com o banco */
+.badge.ok { background: color-mix(in srgb, var(--pos) 15%, transparent); color: var(--pos); }
+.row.sub.conf .title { color: var(--accent); }
+.link-inline { border: 0; background: none; color: var(--accent); padding: 8px 0 0; font-size: 14px; }
+.warn-text { color: var(--neg); }
+.check-diff { margin-top: 12px; }

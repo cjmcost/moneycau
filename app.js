@@ -287,8 +287,11 @@ async function viewAccount(id) {
   render(`<div class="topbar"><button class="back" data-go="#/contas">‹ Contas</button></div>
     <div class="hero"><div class="label">${esc(a.name)}</div>
       <div class="value ${signClass(b.current_balance)}">${money(b.current_balance, a.currency)}</div>
-      <div class="sub">Previsto ${money(b.projected_balance, a.currency)}</div></div>
+      <div class="sub">Previsto ${money(b.projected_balance, a.currency)}</div>
+      <div class="sub" id="check-line"></div>
+      <button class="link-inline" data-action="check-balance" data-id="${id}">Conferir saldo com o banco</button></div>
     ${searchBox("Buscar nesta conta", lastQuery())}<div id="tx-list"></div>`, "contas");
+  showLastBalanceCheck(id);
   await txList({
     load: (q) => q ? sb.rpc("search_transactions", { p_query: q, p_account: id }).select(TX_SELECT)
       : sb.from("transactions").select(TX_SELECT).eq("account_id", id),
@@ -301,6 +304,18 @@ async function viewAccount(id) {
       });
     },
   });
+}
+
+// Última conferência de saldo, refeita com os lançamentos de agora: se alguém mexeu
+// em algo até aquela data, ela deixa de bater.
+async function showLastBalanceCheck(id) {
+  const last = (await must(sb.from("bank_checks").select("*").eq("account_id", id).eq("kind", "balance")
+    .order("ref_date", { ascending: false }).limit(1)))[0];
+  if (!last) return;
+  const now = Number(await must(sb.rpc("account_balance_at", { p_account: id, p_date: last.ref_date })));
+  const el = document.getElementById("check-line"), diff = Number(last.bank_amount) - now;
+  if (el) el.innerHTML = Math.abs(diff) < 0.005 ? `Conferido com o banco em ${yearDay(last.ref_date)} <span class="pos">✓</span>`
+    : `Em ${yearDay(last.ref_date)}, <span class="neg">difere ${money(diff, state.accById.get(id)?.currency)}</span> do banco`;
 }
 
 // Lista paginada de lançamentos com busca. A busca fica guardada para a mesma tela,
@@ -645,6 +660,7 @@ function reportPeriod(cfg) {
   if (cfg.period === "this_year") return { from: `${y}-01-01`, to: `${y}-12-31` };
   if (cfg.period === "last_year") return { from: `${y - 1}-01-01`, to: `${y - 1}-12-31` };
   if (cfg.period === "last_12") return { from: `${monthKey(new Date(y, d.getMonth() - 11, 1))}-01`, to: today() };
+  if (cfg.period === "next_12") return { from: `${monthKey(d)}-01`, to: monthEnd(`${monthKey(new Date(y, d.getMonth() + 11, 1))}-01`) };
   const shift = { last_month: -1, this_month: 0, next_month: 1 }[cfg.period];
   if (shift === undefined) return { from: cfg.from, to: cfg.to };
   const first = new Date(d.getFullYear(), d.getMonth() + shift, 1);
@@ -659,7 +675,8 @@ function periodLabel({ from, to }) {
   return `${dayLabel(from)} ${from.slice(0, 4)} a ${dayLabel(to)} ${to.slice(0, 4)}`;
 }
 
-const REPORT_TYPES = [["summary", "Resumos por categoria"], ["forecast", "Previsões de saldo"], ["cards", "Faturas de cartão"]];
+const REPORT_TYPES = [["summary", "Resumos por categoria"], ["monthly", "Por mês"], ["forecast", "Previsões de saldo"], ["cards", "Faturas de cartão"]];
+const TYPE_SHORT = { summary: "Resumo", monthly: "Por mês", forecast: "Previsão", cards: "Faturas" };
 const byName = (a, b) => a.name.localeCompare(b.name, "pt-BR", { numeric: true });
 
 async function loadReports() {
@@ -687,19 +704,96 @@ async function viewReport(id) {
   const r = state.reports.find((x) => x.id === id);
   if (r?.config?.type === "forecast") return viewForecast(r);
   if (r?.config?.type === "cards") return viewCards(r);
+  if (r?.config?.type === "monthly") return viewMonthly(r);
   if (!r || r.config?.type !== "summary") return go("#/relatorios");
   const period = reportPeriod(r.config);
   const rows = groupLines(await must(sb.rpc("report_lines", {
     p_from: period.from, p_to: period.to, p_accounts: r.config.accounts,
-    p_categories: r.config.categories, p_scheduled: r.config.scheduled })));
+    p_categories: r.config.categories, p_scheduled: r.config.scheduled, p_tags: r.config.tags || null })));
   state.reportRows = rows;
   state.reportFile = `${periodLabel(period)}.csv`;
   render(`<div class="topbar"><button class="back" data-go="#/relatorios">‹ Relatórios</button></div>
     <div class="topbar"><h1>${esc(r.name)}</h1><button class="back" data-action="report-edit" data-id="${r.id}">Editar</button></div>
-    <div class="meta-line">${periodLabel(period)} · ${r.config.accounts.length} conta${r.config.accounts.length === 1 ? "" : "s"}</div>
+    <div class="meta-line">${esc(reportFilters(r.config, period))}</div>
     ${summaryHero(rows, r.config.scheduled && period.to >= today())}
     ${summarySections(rows)}
     ${rows.length ? `<button class="more" data-action="report-export">Exportar CSV</button>` : ""}`, "relatorios");
+}
+
+// Período e filtros de um relatório, numa linha.
+function reportFilters(cfg, period) {
+  const n = (list, one, many) => (list ? `${list.length} ${list.length === 1 ? one : many}` : "");
+  const tags = (cfg.tags || []).map((id) => state.tagById.get(id)?.name).filter(Boolean);
+  return [periodLabel(period), cfg.accounts ? n(cfg.accounts, "conta", "contas") : "todas as contas",
+    cfg.measure !== "transfers" && n(cfg.categories, "categoria", "categorias"),
+    tags.length && (tags.length > 2 ? `${tags.length} tags` : `tag ${tags.join(", ")}`)].filter(Boolean).join(" · ");
+}
+
+// Tela: relatório por mês (categoria ao longo do tempo) ------------------------------------
+// Barras por mês, empilhadas pelo agrupamento escolhido (categoria, subcategoria, conta ou
+// tag), com o teto mensal quando houver. Abaixo, o total de cada grupo no período e os
+// meses, que abrem com o valor de cada grupo.
+
+const MONTHLY_GROUPS = [["category", "Categoria"], ["subcategory", "Subcategoria"], ["account", "Conta"], ["tag", "Tag"], ["total", "Só o total"]];
+const MONTHLY_MEASURES = [["expense", "Gastos"], ["income", "Receitas"], ["transfers", "Transferências (aportes)"]];
+const MONTHLY_PERIODS = [["last_12", "Últimos 12 meses"], ["this_year", "Este ano"], ["last_year", "Ano passado"], ["next_12", "Próximos 12 meses"]];
+const MAX_SERIES = 8;
+
+async function viewMonthly(r) {
+  const c = r.config, period = reportPeriod(c);
+  const rows = await fetchAll(() => sb.rpc("report_monthly", {
+    p_from: period.from, p_to: period.to, p_accounts: c.accounts ?? null, p_categories: c.categories ?? null,
+    p_tags: c.tags ?? null, p_scheduled: c.scheduled ?? true, p_group: c.group || "category", p_measure: c.measure || "expense" }));
+  const months = [], byKey = new Map();
+  for (const d = parseDate(period.from); monthKey(d) <= period.to.slice(0, 7); d.setMonth(d.getMonth() + 1)) {
+    const m = { key: monthKey(d), total: 0, by: new Map() };
+    months.push(m); byKey.set(m.key, m);
+  }
+  const totals = new Map();
+  for (const x of rows) totals.set(x.grp, (totals.get(x.grp) || 0) + Number(x.amount));
+  // as maiores séries ganham cor; o resto vira "Outros"
+  const ranked = [...totals].sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).map(([g]) => g);
+  const keys = ranked.length > MAX_SERIES ? [...ranked.slice(0, MAX_SERIES - 1), "Outros"] : ranked;
+  const keyOf = (g) => (keys.includes(g) ? g : "Outros");
+  for (const x of rows) {
+    const m = byKey.get(x.month.slice(0, 7)), v = Number(x.amount);
+    if (!m) continue;
+    m.total += v;
+    m.by.set(keyOf(x.grp), (m.by.get(keyOf(x.grp)) || 0) + v);
+    (m.detail ??= []).push([x.grp, v]);
+  }
+  months.forEach((m) => { m.total = Math.round(m.total * 100) / 100; });
+  const now = today().slice(0, 7), sum = months.reduce((s, m) => s + m.total, 0);
+  const done = months.filter((m) => m.key < now), over = c.limit ? months.filter((m) => m.total > c.limit) : [];
+  const selected = Math.max(0, months.findIndex((m) => m.key === now));
+  const groupTitle = { category: "Por categoria", subcategory: "Por subcategoria", account: "Por conta", tag: "Por tag" }[c.group];
+  // gastos e receitas já vêm positivos; só nas transferências o sinal (aporte ou resgate) importa
+  const tone = (v) => (c.measure === "transfers" ? signClass(v) : "");
+  const monthRow = (m) => {
+    const detail = (m.detail || []).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+    const badge = m.key > now ? '<span class="badge">previsto</span>' : m.key === now && c.scheduled !== false ? '<span class="badge">em curso</span>' : "";
+    const meta = c.limit ? (m.total > c.limit ? `${money(m.total - c.limit)} acima do teto` : `${money(c.limit - m.total)} abaixo do teto`) : "";
+    return `<button class="row" data-action="toggle-sub" id="mes-${m.key}"><div class="main">
+        <div class="title">${monthLabel(m.key + "-01")}${badge}</div>${meta ? `<div class="meta ${m.total > c.limit ? "warn-text" : ""}">${meta}</div>` : ""}</div>
+        <div class="amount ${tone(m.total)}">${money(m.total)}</div><span class="chev">›</span></button>
+      <div class="sub-rows" hidden>${detail.length && c.group !== "total" ? detail.map(([g, v]) => `<div class="row sub"><div class="main"><div class="title">${esc(g)}</div></div>
+        <div class="amount">${money(v)}</div></div>`).join("") : '<div class="row sub"><div class="main"><div class="title muted">Nada neste mês</div></div></div>'}</div>`;
+  };
+  render(`<div class="topbar"><button class="back" data-go="#/relatorios">‹ Relatórios</button></div>
+    <div class="topbar"><h1>${esc(r.name)}</h1><button class="back" data-action="report-edit" data-id="${r.id}">Editar</button></div>
+    <div class="meta-line">${esc(reportFilters(c, period))}</div>
+    ${barsLegend(keys, undefined, c.limit)}${barsChart(months, keys, selected, { limit: c.limit, label: r.name })}
+    <div class="hero"><div class="label">Total no período</div>
+      <div class="value ${tone(sum)}">${money(sum)}</div>
+      <div class="sub">Média de ${money(months.length ? sum / months.length : 0)} por mês${c.scheduled !== false && months.some((m) => m.key >= now) ? ", com os agendados previstos" : ""}</div>
+      ${c.limit ? `<div class="sub">Teto de ${money(c.limit)} por mês: ${over.length ? `<span class="neg">${over.length} ${over.length === 1 ? "mês acima" : "meses acima"}</span>` : "nenhum mês acima"}</div>` : ""}</div>
+    ${groupTitle && ranked.length > 1 ? `<div class="section-title"><span>${groupTitle}</span></div>
+      <div class="list">${ranked.map((g) => `<div class="row"><div class="main"><div class="title">${esc(g)}</div>
+        <div class="meta">${money(totals.get(g) / Math.max(1, months.length))} por mês</div></div>
+        <div class="amount ${tone(totals.get(g))}">${money(totals.get(g))}</div></div>`).join("")}</div>` : ""}
+    <div class="section-title"><span>Meses</span></div>
+    <div class="list">${months.map(monthRow).join("")}</div>
+    ${rows.length ? "" : '<div class="empty">Nada neste período.</div>'}`, "relatorios");
 }
 
 // Folha: editor de relatórios -----------------------------------------------------------
@@ -716,8 +810,13 @@ function openReportEditor(r) {
     id: r?.id || null,
     name: r?.name || "",
     type: c.type || "summary",
-    accounts: new Set(c.accounts || []),
+    // contas e tags nulas = todas (só resumos e relatórios por mês)
+    accounts: new Set(c.accounts || (!r || ["summary", "monthly"].includes(c.type) ? state.accounts.map((a) => a.id) : [])),
     categories: c.categories ? new Set(c.categories) : null, // null = todas
+    tags: c.tags ? new Set(c.tags) : null,
+    group: c.group || "category",
+    measure: c.measure || "expense",
+    limit: c.limit || null,
     period: c.period || "this_month",
     from: c.from, to: c.to,
     scheduled: c.scheduled ?? true,
@@ -731,7 +830,11 @@ const repAccounts = () => state.accounts.filter((a) => rep.type !== "cards" || a
 
 function drawReportEditor() {
   const e = rep;
-  const periods = e.period === "fixed" ? [...SUMMARY_PERIODS, ["fixed", `Datas fixas (${periodLabel({ from: e.from, to: e.to })})`]] : SUMMARY_PERIODS;
+  const base = e.type === "monthly" ? MONTHLY_PERIODS : SUMMARY_PERIODS;
+  const periods = e.period === "fixed" ? [...base, ["fixed", `Datas fixas (${periodLabel({ from: e.from, to: e.to })})`]] : base;
+  const nTag = e.tags ? e.tags.size : null;
+  const opts = (list, cur) => list.map(([v, l]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${l}</option>`).join("");
+  const byMonth = e.type === "monthly", withCats = e.type === "summary" || (byMonth && e.measure !== "transfers");
   const months = e.type === "cards" ? CARD_PERIODS : FORECAST_MONTHS;
   const nAcc = repAccounts().filter((a) => e.accounts.has(a.id)).length;
   const nCat = e.categories ? e.categories.size : null;
@@ -739,18 +842,22 @@ function drawReportEditor() {
   <div class="sheet" role="dialog" aria-label="Relatório">
     <div class="sheet-head"><button data-action="close">Cancelar</button><h2>${e.id ? "Editar relatório" : "Novo relatório"}</h2>
       <button class="save" data-action="report-save">Salvar</button></div>
-    ${e.id ? "" : `<div class="segmented">${REPORT_TYPES.map(([t]) => `<button class="${e.type === t ? "on" : ""}" data-action="rep-type" data-n="${t}">${{ summary: "Resumo", forecast: "Previsão", cards: "Faturas" }[t]}</button>`).join("")}</div>`}
+    ${e.id ? "" : `<div class="segmented">${REPORT_TYPES.map(([t]) => `<button class="${e.type === t ? "on" : ""}" data-action="rep-type" data-n="${t}">${TYPE_SHORT[t]}</button>`).join("")}</div>`}
     <div class="form">
       <div class="field"><label>Nome</label><input id="rep-name" value="${esc(e.name)}" placeholder="Ex.: Gastos do mês" autocomplete="off"></div>
-      ${e.type === "summary" ? `<div class="field"><label>Período</label><select id="rep-period">${periods.map(([v, l]) =>
-        `<option value="${v}" ${v === e.period ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      ${byMonth ? `<div class="field"><label>Mostrar</label><select id="rep-measure">${opts(MONTHLY_MEASURES, e.measure)}</select></div>
+      <div class="field"><label>Agrupar por</label><select id="rep-group">${opts(MONTHLY_GROUPS, e.group)}</select></div>` : ""}
+      ${e.type === "summary" || byMonth ? `<div class="field"><label>Período</label><select id="rep-period">${opts(periods, e.period)}</select></div>
       <label class="field check"><span class="grow">Incluir agendados previstos</span><input type="checkbox" id="rep-scheduled" ${e.scheduled ? "checked" : ""}></label>`
       : `<div class="field"><label>Período</label><select id="rep-months">${months.map((n) =>
         `<option value="${n}" ${String(e.months) === String(n) ? "selected" : ""}>${n === "year" ? "Este ano" : `${e.type === "cards" ? "" : "Próximos "}${n} meses`}</option>`).join("")}</select></div>`}
       <div class="field"><label>${e.type === "cards" ? "Cartões" : "Contas"}</label>
         <button class="picker ${nAcc ? "" : "placeholder"}" data-action="rep-accounts">${nAcc ? `${nAcc} ${nAcc === 1 ? "escolhida" : "escolhidas"}` : "Escolher"}</button><span class="chev">›</span></div>
-      ${e.type === "summary" ? `<div class="field"><label>Categorias</label>
+      ${withCats ? `<div class="field"><label>Categorias</label>
         <button class="picker" data-action="rep-categories">${nCat === null ? "Todas" : `${nCat} ${nCat === 1 ? "escolhida" : "escolhidas"}`}</button><span class="chev">›</span></div>` : ""}
+      ${e.type === "summary" || byMonth ? `<div class="field"><label>Tags</label>
+        <button class="picker" data-action="rep-tags">${nTag === null ? "Qualquer uma ou nenhuma" : `Só com ${nTag} ${nTag === 1 ? "tag" : "tags"}`}</button><span class="chev">›</span></div>` : ""}
+      ${byMonth ? `<div class="field"><label>Teto mensal</label><input id="rep-limit" inputmode="numeric" autocomplete="off" placeholder="Opcional" value="${e.limit ? centsToText(Math.round(e.limit * 100)) : ""}"></div>` : ""}
     </div>
     ${e.id ? '<button class="more" data-action="report-dup">Duplicar relatório</button><button class="danger" data-action="report-delete">Apagar relatório</button>' : ""}
   </div>`;
@@ -763,6 +870,9 @@ function readReportFields() {
   if (v("rep-period")) rep.period = v("rep-period").value;
   if (v("rep-scheduled")) rep.scheduled = v("rep-scheduled").checked;
   if (v("rep-months")) rep.months = v("rep-months").value === "year" ? "year" : Number(v("rep-months").value);
+  if (v("rep-group")) rep.group = v("rep-group").value;
+  if (v("rep-measure")) rep.measure = v("rep-measure").value;
+  if (v("rep-limit")) rep.limit = Number(v("rep-limit").value.replace(/\D/g, "")) / 100 || null;
 }
 
 // Lista de marcar com "Todas" e "Nenhuma" no topo; rows = [{ id, label, sub, indent }].
@@ -799,6 +909,15 @@ function openRepCategories() {
   checkSheet("Categorias", groups, (id) => rep.categories.has(id));
 }
 
+function openRepTags() {
+  readReportFields();
+  rep.sheet = "tags";
+  if (!rep.tags) rep.tags = new Set(state.tags.map((t) => t.id));
+  checkSheet("Tags", [{ items: state.tags.map((t) => ({ id: t.id, label: t.name })) }], (id) => rep.tags.has(id));
+  document.querySelector(".sheet .pick-all").insertAdjacentHTML("afterend",
+    '<div class="meta-line">Com todas marcadas, o relatório não filtra por tag. Marque só algumas para ver apenas o que tem essas tags.</div>');
+}
+
 // A categoria principal marca e desmarca as subcategorias; com parte delas, fica indeterminada.
 function syncParents() {
   if (rep?.sheet !== "categories") return;
@@ -812,7 +931,7 @@ function syncParents() {
 }
 
 function repToggle(id, on) {
-  const set = rep.sheet === "accounts" ? rep.accounts : rep.categories;
+  const set = rep.sheet === "accounts" ? rep.accounts : rep.sheet === "tags" ? rep.tags : rep.categories;
   const ids = [id, ...(rep.sheet === "categories" ? state.categories.filter((c) => c.parent_id === id).map((c) => c.id) : [])];
   ids.forEach((x) => (on ? set.add(x) : set.delete(x)));
   // marcar uma subcategoria marca a principal, para o lançado direto nela também contar
@@ -829,10 +948,15 @@ async function saveReport() {
   const accounts = repAccounts().filter((a) => e.accounts.has(a.id)).map((a) => a.id);
   if (!accounts.length) return toast(e.type === "cards" ? "Escolha pelo menos um cartão" : "Escolha pelo menos uma conta");
   let config;
-  if (e.type === "summary") {
+  if (e.type === "summary" || e.type === "monthly") {
     const all = !e.categories || e.categories.size === state.categories.length;
     if (e.categories && !e.categories.size) return toast("Escolha pelo menos uma categoria");
-    config = { type: "summary", period: e.period, accounts, categories: all ? null : [...e.categories], scheduled: e.scheduled };
+    if (e.tags && !e.tags.size) return toast("Marque pelo menos uma tag");
+    const allTags = !e.tags || e.tags.size === state.tags.length;
+    config = { type: e.type, period: e.period, scheduled: e.scheduled,
+      accounts: accounts.length === state.accounts.length ? null : accounts,
+      categories: all ? null : [...e.categories], tags: allTags ? null : [...e.tags] };
+    if (e.type === "monthly") Object.assign(config, { group: e.group, measure: e.measure, limit: e.limit || null });
     if (e.period === "fixed") Object.assign(config, { from: e.from, to: e.to });
   } else config = { type: e.type, months: e.months, accounts };
   const old = state.reports.find((r) => r.id === e.id);
@@ -1019,7 +1143,6 @@ async function viewForecast(r) {
 const CARD_PERIODS = ["year", 6, 12, 24];
 const cardPeriodLabel = (cfg) => (cfg.months === "year" ? `ano de ${new Date().getFullYear()}` : `próximos ${cfg.months || 12} meses`);
 const monthKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
-const shortMonth = (key) => { const m = Number(key.slice(5)); return MONTHS[m - 1].slice(0, 3).toLowerCase() + (m === 1 ? `/${key.slice(2, 4)}` : ""); };
 
 function cardRange(cfg) {
   const d = new Date();
@@ -1037,45 +1160,63 @@ function dueDate(items) {
 
 let barChart = null; // meses do gráfico aberto, para a dica
 
-function cardChart(months, accs, selected) {
+// Barras por mês, empilhadas por série (cartão, categoria, conta ou tag). months:
+// [{ key: "AAAA-MM", total, by: Map(série -> valor) }]; keys: séries na ordem das cores,
+// "Outros" fica cinza. Valores negativos descem abaixo do zero. opts.limit desenha o teto.
+function barsChart(months, keys, selected, { name = (k) => k, limit = null, label = "Valor por mês" } = {}) {
   const PW = 296, W = 340, H = 150, top = 12, bottom = H - 20;
-  const hi0 = Math.max(1, ...months.map((m) => m.total));
-  const step = (() => { const raw = hi0 / 4, p = 10 ** Math.floor(Math.log10(raw)); return [1, 2, 5, 10].map((k) => k * p).find((s) => s >= raw); })();
-  const hi = Math.ceil(hi0 / step) * step;
-  const Y = (v) => bottom - (v / hi) * (bottom - top), f = (n) => n.toFixed(1);
+  const sums = (m, sign) => keys.reduce((s, k) => { const v = m.by.get(k) || 0; return s + (Math.sign(v) === sign ? v : 0); }, 0);
+  const hi0 = Math.max(1, limit || 0, ...months.map((m) => sums(m, 1)));
+  // um estorno de poucos reais não abre espaço abaixo do zero
+  let lo0 = Math.min(0, ...months.map((m) => sums(m, -1)));
+  if (-lo0 < hi0 * 0.03) lo0 = 0;
+  const step = (() => { const raw = (hi0 - lo0) / 4, p = 10 ** Math.floor(Math.log10(raw)); return [1, 2, 5, 10].map((k) => k * p).find((s) => s >= raw); })();
+  const hi = Math.ceil(hi0 / step) * step, lo = Math.floor(lo0 / step) * step;
+  const Y = (v) => top + ((hi - v) / (hi - lo)) * (bottom - top), f = (n) => n.toFixed(1);
   const band = PW / months.length, bw = Math.min(22, band * 0.62), every = months.length > 12 ? 2 : 1, now = monthKey(new Date());
+  const multi = keys.length > 1;
   let grid = "";
-  for (let v = 0; v <= hi + step / 2; v += step) {
-    grid += `<line class="${v ? "grid" : "tick"}" x1="0" x2="${PW}" y1="${f(Y(v))}" y2="${f(Y(v))}"/><text x="${PW + 5}" y="${f(Y(v) + 3)}">${compactMoney(v)}</text>`;
+  for (let v = lo; v <= hi + step / 2; v += step) {
+    grid += `<line class="${Math.abs(v) < step / 2 ? "tick" : "grid"}" x1="0" x2="${PW}" y1="${f(Y(v))}" y2="${f(Y(v))}"/><text x="${PW + 5}" y="${f(Y(v) + 3)}">${compactMoney(v)}</text>`;
   }
   let bars = "";
   months.forEach((m, i) => {
     const x = i * band + (band - bw) / 2;
-    // segmentos empilhados na ordem das contas do relatório; só o de cima tem a ponta arredondada
-    const segs = accs.map((id, k) => [k, Math.max(0, m.byCard.get(id) || 0)]).filter(([, v]) => v > 0.005);
-    let base = 0;
-    segs.forEach(([k, v], j) => {
-      const y0 = Y(base), y1 = Y(base + v), h = y0 - y1, r = j === segs.length - 1 ? Math.min(4, h, bw / 2) : 0;
-      const gap = j ? 1 : 0; // 2px de fundo entre os segmentos (1px de cada lado)
-      bars += `<path class="bar s${accs.length > 1 ? k + 1 : 0}${m.key < now ? " past" : ""}" d="M${f(x)},${f(y0 - gap)}V${f(y1 + r)}${r ? `Q${f(x)},${f(y1)} ${f(x + r)},${f(y1)}H${f(x + bw - r)}Q${f(x + bw)},${f(y1)} ${f(x + bw)},${f(y1 + r)}` : `H${f(x + bw)}`}V${f(y0 - gap)}Z"/>`;
-      base += v;
-    });
-    if (i % every === 0) bars += `<text x="${f(i * band + band / 2)}" y="${H - 4}" text-anchor="middle"${m.key === now ? ' class="now"' : ""}>${shortMonth(m.key)}</text>`;
-    bars += `<rect class="bar-hit" x="${f(i * band)}" y="${top}" width="${f(band)}" height="${bottom - top}" data-action="card-month" data-month="${m.key}" data-i="${i}"/>`;
+    // positivos sobem do zero e negativos descem; só a ponta de fora de cada pilha é arredondada
+    for (const sign of [1, -1]) {
+      const segs = keys.map((k, idx) => [k, idx, m.by.get(k) || 0]).filter(([, , v]) => Math.sign(v) === sign && Math.abs(v) > 0.005);
+      let base = 0;
+      segs.forEach(([k, idx, v], j) => {
+        const ya = Y(base), yb = Y(base + v), r = j === segs.length - 1 ? Math.min(4, Math.abs(ya - yb), bw / 2) : 0;
+        const gap = j ? sign : 0; // 2px de fundo entre os segmentos
+        const cls = `bar ${!multi ? "s0" : k === "Outros" ? "so" : `s${idx + 1}`}${m.key < now ? " past" : ""}`;
+        const y0 = ya - gap, tip = yb + sign * r, end = yb;
+        bars += `<path class="${cls}" d="M${f(x)},${f(y0)}V${f(tip)}${r ? `Q${f(x)},${f(end)} ${f(x + r)},${f(end)}H${f(x + bw - r)}Q${f(x + bw)},${f(end)} ${f(x + bw)},${f(tip)}` : `H${f(x + bw)}`}V${f(y0)}Z"/>`;
+        base += v;
+      });
+    }
+    if (i % every === 0) bars += `<text x="${f(i * band + band / 2)}" y="${H - 4}" text-anchor="middle"${m.key === now ? ' class="now"' : ""}>${MONTHS[Number(m.key.slice(5)) - 1].slice(0, 3).toLowerCase()}</text>`;
+    // virada do ano: linha discreta e o ano no topo
+    if (i > 0 && m.key.endsWith("-01")) bars += `<line class="tick" x1="${f(i * band)}" x2="${f(i * band)}" y1="${top - 6}" y2="${bottom}"/><text class="year" x="${f(i * band + 3)}" y="${top + 1}">${m.key.slice(0, 4)}</text>`;
+    bars += `<rect class="bar-hit" x="${f(i * band)}" y="${top}" width="${f(band)}" height="${bottom - top}" data-action="bar-month" data-month="${m.key}" data-i="${i}"/>`;
   });
-  barChart = { months, accs };
-  barChart.selected = selected;
-  return `<div class="chart"><svg class="bars" viewBox="0 0 ${W} ${H}" role="img" aria-label="Fatura por mês">${grid}${bars}</svg>
+  if (limit) bars += `<line class="limit" x1="0" x2="${PW}" y1="${f(Y(limit))}" y2="${f(Y(limit))}"/>`;
+  barChart = { months, keys, name, selected };
+  return `<div class="chart"><svg class="bars" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">${grid}${bars}</svg>
     <div class="bar-readout">${barReadout(months[selected])}</div></div>`;
 }
 
-// Linha abaixo do gráfico: mês, total e, no consolidado, o valor de cada cartão.
+// Legenda das séries, com a mesma cor das barras.
+const barsLegend = (keys, name = (k) => k, limit = null) => keys.length > 1 || limit
+  ? `<div class="legend">${keys.length > 1 ? keys.map((k, i) => `<span><i class="sw ${k === "Outros" ? "so" : `s${i + 1}`}"></i>${esc(name(k))}</span>`).join("") : ""}${limit ? `<span><i class="sw-limit"></i>Teto ${money(limit)}</span>` : ""}</div>` : "";
+
+// Linha abaixo do gráfico: mês, total e, com várias séries, o valor de cada uma.
 function barReadout(m) {
   if (!m) return "";
-  const accs = barChart?.accs || [];
-  return `<span>${monthLabel(m.key + "-01")}</span><b>${money(m.total)}</b>` + (accs.length > 1 ? accs
-    .filter((id) => Math.abs(m.byCard.get(id) || 0) >= 0.005)
-    .map((id) => `<span class="tip-card"><i class="sw s${accs.indexOf(id) + 1}"></i>${esc(cardName(id))} ${money(m.byCard.get(id))}</span>`).join("") : "");
+  const keys = barChart?.keys || [], name = barChart?.name || ((k) => k);
+  return `<span>${monthLabel(m.key + "-01")}</span><b>${money(m.total)}</b>` + (keys.length > 1 ? keys
+    .map((k, i) => [k, i, m.by.get(k) || 0]).filter(([, , v]) => Math.abs(v) >= 0.005)
+    .map(([k, i, v]) => `<span class="tip-card"><i class="sw ${k === "Outros" ? "so" : `s${i + 1}`}"></i>${esc(name(k))} ${money(v)}</span>`).join("") : "");
 }
 
 function barHover(ev) {
@@ -1095,21 +1236,24 @@ const cardName = (id) => (state.accById.get(id)?.name || "").replace(/\b(Banco|M
 
 async function viewCards(r) {
   const accs = r.config.accounts, inSet = new Set(accs), { from, to } = cardRange(r.config), multi = accs.length > 1, t0 = today();
-  const [txs, occs] = await Promise.all([
+  const [txs, occs, checks] = await Promise.all([
     fetchAll(() => sb.from("transactions").select(TX_SELECT).in("account_id", accs).gte("date", from).lte("date", to)
       .order("date").order("created_at").order("id")),
     fetchAll(() => sb.rpc("scheduled_occurrences", { p_from: from, p_to: to })),
+    must(sb.from("bank_checks").select("*").eq("kind", "invoice").in("account_id", accs).gte("ref_date", from).lte("ref_date", to)),
   ]);
+  const checkOf = new Map(checks.map((c) => [`${c.account_id}|${c.ref_date.slice(0, 7)}`, c]));
   const months = [], byKey = new Map();
   for (const d = parseDate(from); monthKey(d) <= to.slice(0, 7); d.setMonth(d.getMonth() + 1)) {
     const m = { key: monthKey(d), total: 0, byCard: new Map(), paidBy: new Map(), items: [] };
+    m.by = m.byCard;
     months.push(m); byKey.set(m.key, m);
   }
-  const add = (date, acc, amount, row) => {
+  const add = (date, acc, amount, row, label) => {
     const m = byKey.get(date.slice(0, 7));
     m.total -= amount;
     m.byCard.set(acc, (m.byCard.get(acc) || 0) - amount);
-    m.items.push({ date, acc, amount, row });
+    m.items.push({ date, acc, amount, row, label });
   };
   for (const t of txs) {
     txCache.set(t.id, t);
@@ -1118,13 +1262,13 @@ async function viewCards(r) {
       if (t.date <= t0) m.paidBy.set(t.account_id, (m.paidBy.get(t.account_id) || 0) + Number(t.amount));
       continue;
     }
-    add(t.date, t.account_id, Number(t.amount), () => txRow(t, { withAccount: multi, currency: state.accById.get(t.account_id)?.currency }));
+    add(t.date, t.account_id, Number(t.amount), () => txRow(t, { withAccount: multi, currency: state.accById.get(t.account_id)?.currency }), txTitle(t));
   }
   const schedById = new Map(state.scheduled.map((s) => [s.id, s]));
   for (const o of occs) {
     const s = schedById.get(o.scheduled_id);
     if (!s || o.skipped || s.kind === "transfer" || !inSet.has(s.account_id)) continue;
-    add(o.date, s.account_id, Number(o.amount), () => occRow(o, s, Number(o.amount), null, multi));
+    add(o.date, s.account_id, Number(o.amount), () => occRow(o, s, Number(o.amount), null, multi), schedTitle(s));
   }
   const now = t0.slice(0, 7);
   for (const m of months) {
@@ -1133,7 +1277,9 @@ async function viewCards(r) {
     m.cards = accs.filter((id) => Math.abs(m.byCard.get(id) || 0) >= 0.005).map((id) => {
       const total = m.byCard.get(id), due = dueDate(m.items.filter((it) => it.acc === id));
       const open = total > 0 && (m.paidBy.get(id) || 0) < total - 0.01;
-      return { id, total, due, open, late: open && due < t0 };
+      // conferida: o total do banco ainda bate com o que está lançado agora
+      const check = checkOf.get(`${id}|${m.key}`);
+      return { id, total, due, open, late: open && due < t0, check, ok: check && Math.abs(Number(check.bank_amount) - total) < 0.005 };
     });
     const open = m.cards.filter((c) => c.open);
     m.isPaid = m.total > 0 && !open.length;
@@ -1145,29 +1291,144 @@ async function viewCards(r) {
   const ahead = months.filter((m) => m.key >= now);
   const total = ahead.reduce((s, m) => s + m.total, 0);
   const names = accs.map(cardName);
-  const legend = multi ? `<div class="legend">${accs.map((id, k) => `<span><i class="sw s${k + 1}"></i>${esc(names[k])}</span>`).join("")}</div>` : "";
+  const legend = barsLegend(accs, cardName);
+  state.cardMonths = byKey; // para a folha de conferência
+  const checkText = (c) => (c.ok ? " · conferida" : c.check ? ` · difere ${money(Number(c.check.bank_amount) - c.total)} do banco` : "");
   const monthRow = (m) => {
-    const badge = m.isPaid ? '<span class="badge">paga</span>' : m.late ? '<span class="badge warn">em aberto</span>' : "";
+    const checked = m.cards.length && m.cards.every((c) => c.ok), differs = m.cards.some((c) => c.check && !c.ok);
+    const badge = (m.isPaid ? '<span class="badge">paga</span>' : m.late ? '<span class="badge warn">em aberto</span>' : "")
+      + (checked ? '<span class="badge ok">conferida</span>' : differs ? '<span class="badge warn">difere do banco</span>' : "");
     const count = `${m.items.length} ${m.items.length === 1 ? "item" : "itens"}`;
-    // no consolidado, uma linha por cartão com valor, vencimento e se já foi paga
-    const meta = multi ? [count, ...m.cards.map((c) => `${cardName(c.id)} ${money(c.total)}${c.due ? ` · dia ${Number(c.due.slice(8))}` : ""}${c.late ? " · em aberto" : !c.open && !m.isPaid ? " · paga" : ""}`)]
-      : [[m.due && `vence ${dayLabel(m.due)}`, count].filter(Boolean).join(" · ")];
-    return `<button class="row" data-action="toggle-sub" id="fatura-${m.key}"><div class="main">
+    // no consolidado, uma linha por cartão com valor, vencimento, pagamento e conferência
+    const meta = multi ? [count, ...m.cards.map((c) => `${cardName(c.id)} ${money(c.total)}${c.due ? ` · dia ${Number(c.due.slice(8))}` : ""}${c.late ? " · em aberto" : !c.open && !m.isPaid ? " · paga" : ""}${checkText(c)}`)]
+      : [[m.due && `vence ${dayLabel(m.due)}`, count, !m.cards[0]?.ok && m.cards[0]?.check && checkText(m.cards[0]).slice(3)].filter(Boolean).join(" · ")];
+    const conf = m.cards.map((c) => `<button class="row sub conf" data-action="check-invoice" data-id="${c.id}" data-month="${m.key}">
+        <div class="main"><div class="title">Conferir com o banco${multi ? `: ${esc(cardName(c.id))}` : ""}</div></div><span class="chev">›</span></button>`).join("");
+    return `<button class="row" data-action="toggle-sub" id="mes-${m.key}"><div class="main">
         <div class="title">${monthLabel(m.key + "-01")}${badge}</div>${meta.map((x) => `<div class="meta wrap">${esc(x)}</div>`).join("")}</div>
         <div class="amount">${money(m.total)}</div><span class="chev">›</span></button>
-      <div class="sub-rows" hidden>${m.items.map((it) => it.row()).join("") || '<div class="empty">Nada nesta fatura.</div>'}</div>`;
+      <div class="sub-rows" hidden>${conf}${m.items.map((it) => it.row()).join("") || '<div class="empty">Nada nesta fatura.</div>'}</div>`;
   };
   render(`<div class="topbar"><button class="back" data-go="#/relatorios">‹ Relatórios</button></div>
     <div class="topbar"><h1>${esc(r.name)}</h1><button class="back" data-action="report-edit" data-id="${r.id}">Editar</button></div>
     <div class="meta-line">${esc(names.length > 2 ? `${names.length} cartões` : accs.map((id) => state.accById.get(id)?.name).join(" e "))} · ${cardPeriodLabel(r.config)}</div>
     <div class="segmented">${CARD_PERIODS.map((n) => `<button class="${(r.config.months || 12) === n ? "on" : ""}" data-action="card-months" data-id="${r.id}" data-n="${n}">${n === "year" ? "Este ano" : `${n} meses`}</button>`).join("")}</div>
-    ${legend}${cardChart(months, accs, Math.max(0, months.indexOf(next ?? months.find((m) => m.key === now))))}
+    ${legend}${barsChart(months, accs, Math.max(0, months.indexOf(next ?? months.find((m) => m.key === now))), { name: cardName, label: "Fatura por mês" })}
     <div class="hero"><div class="label">${next ? `Próxima fatura${next.due ? `, vence ${yearDay(next.due)}` : ""}` : "Próxima fatura"}</div>
       <div class="value">${money(next?.total || 0)}</div>
       <div class="sub">De ${monthLabel(now + "-01").toLowerCase()} em diante: ${money(total)}, média de ${money(ahead.length ? total / ahead.length : 0)} por mês</div></div>
     <div class="section-title"><span>Faturas</span></div>
     <div class="list">${months.map(monthRow).join("")}</div>
     <div class="meta-line">Toque num mês para ver as compras. Toque num agendado para mudar só aquela parcela.</div>`, "relatorios");
+}
+
+// Folha: conferir com o banco ----------------------------------------------------------
+// Fatura: o total do PDF contra o total lançado no cartão naquele mês. Saldo: o saldo do
+// banco num dia contra o saldo do MoneyCau no fim daquele dia. Com diferença, a folha
+// sugere onde procurar.
+
+let chk = null;
+const localDate = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+
+function openInvoiceCheck(accId, key) {
+  const m = state.cardMonths?.get(key), card = m?.cards.find((c) => c.id === accId);
+  if (!m || !card) return;
+  const items = m.items.filter((it) => it.acc === accId);
+  chk = { kind: "invoice", account: accId, ref: key + "-01", app: card.total, items, prev: card.check,
+    cents: card.check ? Math.round(Number(card.check.bank_amount) * 100) : 0,
+    title: "Conferir fatura", sub: `${state.accById.get(accId)?.name} · ${monthLabel(key + "-01").toLowerCase()}` };
+  drawCheck();
+}
+
+async function openBalanceCheck(accId) {
+  const last = (await must(sb.from("bank_checks").select("*").eq("account_id", accId).eq("kind", "balance")
+    .order("ref_date", { ascending: false }).limit(1)))[0];
+  chk = { kind: "balance", account: accId, ref: today(), prev: last, cents: 0, negative: false,
+    title: "Conferir saldo", sub: state.accById.get(accId)?.name };
+  await loadBalanceAt();
+  chk.negative = chk.app < 0;
+  drawCheck();
+}
+
+// Saldo do MoneyCau no fim do dia escolhido e os lançamentos dos 45 dias anteriores,
+// onde costuma estar a diferença.
+async function loadBalanceAt() {
+  const [bal, txs] = await Promise.all([
+    must(sb.rpc("account_balance_at", { p_account: chk.account, p_date: chk.ref })),
+    must(sb.from("transactions").select(TX_SELECT).eq("account_id", chk.account)
+      .gte("date", addDays(chk.ref, -45)).lte("date", chk.ref).order("date", { ascending: false }).range(0, 999)),
+  ]);
+  chk.app = Number(bal);
+  chk.items = txs.map((t) => { txCache.set(t.id, t); return { date: t.date, amount: Number(t.amount), label: txTitle(t), row: () => txRow(t) }; });
+}
+
+const checkBank = () => (chk.kind === "balance" && chk.negative ? -1 : 1) * chk.cents / 100;
+
+// Onde procurar a diferença: um lançamento com o valor exato, dois que somam a
+// diferença ou lançamentos repetidos (mesmo nome e valor).
+function checkHints() {
+  const diff = Math.round((chk.app - checkBank()) * 100); // positivo: o MoneyCau tem a mais
+  if (!diff) return "";
+  // na fatura, compra é positiva; no saldo, o que pesa é o valor com sinal
+  const val = (it) => Math.round((chk.kind === "invoice" ? -it.amount : it.amount) * 100);
+  const items = chk.items || [];
+  const exact = items.filter((it) => Math.abs(val(it)) === Math.abs(diff));
+  const pairs = [];
+  for (let i = 0; i < items.length && pairs.length < 3; i++)
+    for (let j = i + 1; j < items.length && pairs.length < 3; j++)
+      if (val(items[i]) + val(items[j]) === diff) pairs.push([items[i], items[j]]);
+  // repetido: mesmo nome e valor com até 3 dias de distância (salário de todo mês não conta)
+  const dups = [];
+  items.forEach((a, i) => items.slice(i + 1).forEach((b) => {
+    if (norm(a.label) === norm(b.label) && val(a) === val(b) && Math.abs(parseDate(a.date) - parseDate(b.date)) <= 3 * 864e5)
+      [a, b].forEach((x) => { if (!dups.includes(x)) dups.push(x); });
+  }));
+  const block = (title, rows) => rows.length ? `<div class="section-title"><span>${title}</span></div><div class="list">${rows.map((it) => it.row()).join("")}</div>` : "";
+  const more = diff > 0;
+  return `<div class="hero check-diff"><div class="label">Diferença</div>
+      <div class="value warn-text">${money(Math.abs(diff) / 100)}</div>
+      <div class="sub">${chk.kind === "invoice" ? (more ? "O MoneyCau tem a mais que a fatura: procure compra repetida, lançada no mês errado ou com valor maior." : "Falta lançar algo no MoneyCau, ou alguma compra está com valor menor.")
+        : (more ? "O saldo do MoneyCau está maior que o do banco: falta lançar uma saída ou alguma entrada está a mais." : "O saldo do MoneyCau está menor que o do banco: falta lançar uma entrada ou alguma saída está a mais.")}</div></div>
+    ${block(`Com o valor exato de ${money(Math.abs(diff) / 100)}`, exact)}
+    ${block("Dois lançamentos que somam a diferença", pairs.flat())}
+    ${block("Possíveis repetidos", dups)}
+    ${!exact.length && !pairs.length && !dups.length ? '<div class="meta-line">Nenhum lançamento explica a diferença sozinho. Compare item a item com o extrato.</div>' : ""}`;
+}
+
+function drawCheck() {
+  const e = chk, cur = state.accById.get(e.account)?.currency || "BRL";
+  $sheet.innerHTML = `<div class="sheet-backdrop" data-action="close"></div>
+  <div class="sheet" role="dialog" aria-label="${esc(e.title)}">
+    <div class="sheet-head"><button data-action="close">Cancelar</button><h2>${esc(e.title)}</h2>
+      <button class="save" data-action="check-save">Salvar</button></div>
+    <div class="hero"><div class="label">${esc(e.sub)}</div>
+      <div class="sub">No MoneyCau${e.kind === "balance" ? ` no fim de ${yearDay(e.ref)}` : ""}: <b>${money(e.app, cur)}</b>${e.kind === "invoice" ? ` em ${e.items.length} ${e.items.length === 1 ? "item" : "itens"}` : ""}</div>
+      ${e.prev ? `<div class="sub">Última conferência${e.kind === "balance" ? ` (${yearDay(e.prev.ref_date)})` : ""}: banco ${money(e.prev.bank_amount, cur)}, feita em ${yearDay(localDate(e.prev.created_at))}</div>` : ""}</div>
+    <div class="form">
+      ${e.kind === "balance" ? `<div class="field"><label>Data</label><input id="check-date" type="date" value="${e.ref}" max="${today()}"></div>` : ""}
+      <div class="field"><label>${e.kind === "invoice" ? "Total da fatura" : "Saldo no banco"}</label>
+        <input id="check-amount" inputmode="numeric" autocomplete="off" placeholder="0,00" value="${e.cents ? centsToText(e.cents) : ""}"></div>
+      ${e.kind === "balance" ? `<label class="field check"><span class="grow">Saldo negativo</span><input type="checkbox" id="check-negative" ${e.negative ? "checked" : ""}></label>` : ""}
+    </div>
+    <div id="check-result">${checkResult()}</div>
+  </div>`;
+}
+
+function checkResult() {
+  if (!chk.cents) return '<div class="meta-line">Digite o valor que aparece no banco.</div>';
+  return Math.round((chk.app - checkBank()) * 100) === 0
+    ? '<div class="hero"><div class="value pos">Bate ✓</div><div class="sub">O MoneyCau confere com o banco.</div></div>'
+    : checkHints();
+}
+
+async function saveCheck() {
+  if (!chk.cents && !(chk.kind === "balance")) return toast("Digite o valor do banco");
+  await must(sb.from("bank_checks").upsert({ account_id: chk.account, kind: chk.kind, ref_date: chk.ref,
+    bank_amount: checkBank(), app_amount: chk.app, created_at: new Date().toISOString() }, { onConflict: "account_id,kind,ref_date" }));
+  const ok = Math.round((chk.app - checkBank()) * 100) === 0;
+  closeSheet();
+  toast(ok ? "Conferido: bate com o banco" : "Conferência salva com diferença");
+  route();
 }
 
 // Folha: só nesta data (exceção de uma ocorrência) ----------------------------------
@@ -1275,7 +1536,7 @@ function openEntry(init = {}) {
   if (!entry.id && !entry.readOnly) setTimeout(() => document.getElementById("amount")?.focus(), 250);
 }
 
-function closeSheet() { $sheet.innerHTML = ""; entry = null; occ = null; rep = null; }
+function closeSheet() { $sheet.innerHTML = ""; entry = null; occ = null; rep = null; chk = null; }
 
 function drawEntry() {
   const e = entry;
@@ -1677,9 +1938,14 @@ document.addEventListener("click", async (ev) => {
       readReportFields();
       rep.type = el.dataset.n;
       rep.months = rep.type === "cards" ? 12 : 3;
+      // relatório novo: resumos e "por mês" começam com todas as contas; previsão e faturas, sem nenhuma
+      rep.accounts = new Set(["summary", "monthly"].includes(rep.type) ? state.accounts.map((a) => a.id) : []);
+      if (rep.type === "monthly" && !MONTHLY_PERIODS.some(([v]) => v === rep.period)) rep.period = "last_12";
+      if (rep.type === "summary" && !SUMMARY_PERIODS.some(([v]) => v === rep.period)) rep.period = "this_month";
       return drawReportEditor();
     case "rep-accounts": return openRepAccounts();
     case "rep-categories": return openRepCategories();
+    case "rep-tags": return openRepTags();
     case "rep-back": rep.sheet = null; return drawReportEditor();
     case "rep-all": {
       const on = el.dataset.n === "1";
@@ -1688,7 +1954,7 @@ document.addEventListener("click", async (ev) => {
     }
     case "report-dup":
       readReportFields();
-      rep = { ...rep, id: null, name: `${rep.name} (cópia)`, accounts: new Set(rep.accounts), categories: rep.categories && new Set(rep.categories) };
+      rep = { ...rep, id: null, name: `${rep.name} (cópia)`, accounts: new Set(rep.accounts), categories: rep.categories && new Set(rep.categories), tags: rep.tags && new Set(rep.tags) };
       return drawReportEditor();
     case "report-delete": {
       if (!confirm(`Apagar o relatório "${rep.name}"? Os lançamentos não mudam.`)) return;
@@ -1696,14 +1962,17 @@ document.addEventListener("click", async (ev) => {
       closeSheet(); toast("Relatório apagado");
       return go("#/relatorios");
     }
+    case "check-invoice": return openInvoiceCheck(id, el.dataset.month);
+    case "check-balance": return openBalanceCheck(id);
+    case "check-save": el.disabled = true; try { await saveCheck(); } finally { el.disabled = false; } return;
     case "card-months": {
       const r = state.reports.find((x) => x.id === id);
       r.config = { ...r.config, months: el.dataset.n === "year" ? "year" : Number(el.dataset.n) };
       await must(sb.from("reports").update({ config: r.config }).eq("id", id));
       return route();
     }
-    case "card-month": {
-      const row = document.getElementById("fatura-" + el.dataset.month);
+    case "bar-month": {
+      const row = document.getElementById("mes-" + el.dataset.month);
       if (row?.nextElementSibling.hidden) row.click();
       return row?.scrollIntoView({ behavior: "smooth", block: "start" });
     }
@@ -1731,10 +2000,23 @@ document.addEventListener("click", async (ev) => {
 document.addEventListener("change", (ev) => {
   const id = ev.target.dataset?.repItem;
   if (id && rep) repToggle(id, ev.target.checked);
+  if (chk && ev.target.id === "check-negative") { chk.negative = ev.target.checked; document.getElementById("check-result").innerHTML = checkResult(); }
+  if (chk && ev.target.id === "check-date" && ev.target.value) {
+    chk.ref = ev.target.value;
+    loadBalanceAt().then(() => { if (chk) drawCheck(); });
+  }
+  // trocar o que o relatório mostra muda os campos (transferências não têm categoria)
+  if (ev.target.id === "rep-measure" && rep) { readReportFields(); drawReportEditor(); }
 });
 
 document.addEventListener("input", (ev) => {
   const t = ev.target;
+  if (t.id === "check-amount" && chk) {
+    chk.cents = Math.min(Number(t.value.replace(/\D/g, "") || 0), 99999999999);
+    t.value = chk.cents ? centsToText(chk.cents) : "";
+    document.getElementById("check-result").innerHTML = checkResult();
+    return;
+  }
   if (t.id === "occ-amount" && occ) {
     occ.cents = Math.min(Number(t.value.replace(/\D/g, "") || 0), 99999999999);
     t.value = centsToText(occ.cents);
