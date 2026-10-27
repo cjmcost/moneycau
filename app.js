@@ -533,6 +533,8 @@ function viewMore() {
     <div class="list">
       <div class="row"><div class="main"><div class="title">Conectado como</div>
         <div class="meta">${esc(state.session?.user?.email)}</div></div></div>
+      <button class="row" data-action="bio-toggle"><div class="main"><div class="title">Desbloquear com Face ID / Touch ID</div>
+        <div class="meta">${lockCred() ? "Ativado neste aparelho. Toque para desativar." : "Desativado. Sem ele, o app pede a senha ao abrir."}</div></div></button>
       <button class="row" data-action="reload"><div class="main"><div class="title">Atualizar dados</div></div></button>
       <button class="row" data-go="#/recentes"><div class="main"><div class="title">Recentes</div>
         <div class="meta">Últimos lançamentos de todas as contas</div></div><span class="chev">›</span></button>
@@ -2108,6 +2110,17 @@ document.addEventListener("click", async (ev) => {
     case "toggle-sub": { const sub = el.nextElementSibling; sub.hidden = !sub.hidden; el.classList.toggle("open", !sub.hidden); return; }
     case "toggle-budget-accounts": state.showBudgetAccounts = !state.showBudgetAccounts; return viewBudget();
     case "logout": await sb.auth.signOut(); return;
+    case "bio-toggle":
+      if (lockCred()) {
+        if (!confirm("Desativar o Face ID / Touch ID neste aparelho? O app vai pedir a senha ao abrir.")) return;
+        try { localStorage.removeItem(LOCK_KEY); } catch {}
+        toast("Desbloqueio com Face ID / Touch ID desativado");
+      } else {
+        if (!(await bioAvailable())) return toast("Este aparelho não oferece Face ID ou Touch ID para o app");
+        try { await enrollBio(); toast("Pronto: o app vai desbloquear com Face ID / Touch ID"); }
+        catch { toast("Não foi possível ativar agora"); }
+      }
+      return viewMore();
   }
 });
 
@@ -2200,6 +2213,100 @@ function route() {
 }
 window.addEventListener("hashchange", route);
 
+// Bloqueio ----------------------------------------------------------------------
+// Com a sessão guardada no aparelho, o app abre bloqueado e pede Face ID / Touch ID (uma chave
+// WebAuthn do próprio aparelho) ou a senha, e volta a bloquear depois de 5 minutos fora.
+// É uma tranca local: protege de quem pega o aparelho; a sessão continua guardada no navegador.
+
+const LOCK_AFTER = 5 * 60 * 1000;
+const LOCK_KEY = "mc-lock-cred"; // id da chave do aparelho, em base64url
+let unlocked = false, hiddenAt = 0, bioOffered = false;
+const lockCred = () => { try { return localStorage.getItem(LOCK_KEY); } catch { return null; } };
+const b64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const fromB64url = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+
+async function bioAvailable() {
+  try { return !!window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable(); }
+  catch { return false; }
+}
+
+async function enrollBio() {
+  const u = state.session.user;
+  const cred = await navigator.credentials.create({ publicKey: {
+    challenge: crypto.getRandomValues(new Uint8Array(32)),
+    rp: { name: "MoneyCau" },
+    user: { id: new TextEncoder().encode(u.id), name: u.email, displayName: u.email },
+    pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+    authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" },
+    timeout: 60000,
+  } });
+  localStorage.setItem(LOCK_KEY, b64url(cred.rawId));
+}
+
+async function verifyBio() {
+  await navigator.credentials.get({ publicKey: {
+    challenge: crypto.getRandomValues(new Uint8Array(32)),
+    allowCredentials: [{ type: "public-key", id: fromB64url(lockCred()) }],
+    userVerification: "required",
+    timeout: 60000,
+  } });
+}
+
+function unlock() {
+  unlocked = true;
+  start(state.session);
+}
+
+function viewLock(message = "") {
+  closeSheet();
+  const bio = !!lockCred();
+  $app.innerHTML = `<form class="login" id="unlock">
+    <h1>MoneyCau</h1><p>${bio ? "Desbloqueie para ver suas finanças." : "Digite sua senha para desbloquear."}</p>
+    ${bio ? '<button class="primary" type="button" id="bio">Desbloquear com Face ID / Touch ID</button><p class="or">ou use a senha</p>' : ""}
+    <input id="email" type="email" autocomplete="username" value="${esc(state.session.user.email)}" readonly hidden>
+    <input id="password" type="password" autocomplete="current-password" placeholder="Senha" required>
+    <div class="error">${esc(message)}</div>
+    <button class="${bio ? "secondary" : "primary"}" type="submit">Desbloquear com a senha</button>
+    <button class="link" type="button" id="lock-out">Sair desta conta</button></form>`;
+  document.getElementById("bio")?.addEventListener("click", async () => {
+    try { await verifyBio(); unlock(); }
+    catch { viewLock("Não foi possível confirmar. Tente de novo ou use a senha."); }
+  });
+  document.getElementById("unlock").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    ev.target.querySelector("[type=submit]").disabled = true;
+    const { error } = await sb.auth.signInWithPassword({ email: state.session.user.email, password: document.getElementById("password").value });
+    if (error) return viewLock(error.message === "Invalid login credentials" ? "Senha incorreta." : error.message);
+    unlock();
+  });
+  document.getElementById("lock-out").addEventListener("click", () => sb.auth.signOut());
+}
+
+// Depois de entrar com a senha, oferece o Face ID / Touch ID uma vez por abertura do app.
+function viewBioOffer() {
+  bioOffered = true;
+  $app.innerHTML = `<div class="login">
+    <h1>Desbloqueio rápido</h1>
+    <p>Quer usar o Face ID (iPhone) ou o Touch ID (Mac) para abrir o MoneyCau, em vez de digitar a senha?</p>
+    <button class="primary" type="button" id="bio-yes">Usar Face ID / Touch ID</button>
+    <button class="link" type="button" id="bio-no">Agora não</button></div>`;
+  document.getElementById("bio-yes").addEventListener("click", async () => {
+    try { await enrollBio(); toast("Pronto: da próxima vez, use o Face ID / Touch ID"); }
+    catch { toast("Não foi possível ativar agora. Dá para ativar depois em Mais."); }
+    start(state.session);
+  });
+  document.getElementById("bio-no").addEventListener("click", () => start(state.session));
+}
+
+// Voltar ao app depois de 5 minutos fora bloqueia de novo.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  if (unlocked && state.session && !recovering && hiddenAt && Date.now() - hiddenAt > LOCK_AFTER) {
+    unlocked = false;
+    viewLock();
+  }
+});
+
 // Login --------------------------------------------------------------------------
 
 function viewLogin(message = "") {
@@ -2214,11 +2321,13 @@ function viewLogin(message = "") {
     ev.preventDefault();
     const btn = ev.target.querySelector("button");
     btn.disabled = true;
+    unlocked = true; // acabou de digitar a senha: não pede de novo
     const { error } = await sb.auth.signInWithPassword({
       email: document.getElementById("email").value.trim(),
       password: document.getElementById("password").value,
     });
     btn.disabled = false;
+    if (error) unlocked = false;
     if (error) viewLogin(error.message === "Invalid login credentials" ? "E-mail ou senha incorretos." : error.message);
   });
   document.getElementById("forgot").addEventListener("click", async () => {
@@ -2244,6 +2353,7 @@ function viewNewPassword(message = "") {
     const { error } = await sb.auth.updateUser({ password });
     if (error) return viewNewPassword(error.message);
     recovering = false;
+    unlocked = true; // acabou de criar a senha
     history.replaceState(null, "", location.pathname);
     toast("Senha alterada.");
     start(state.session);
@@ -2252,8 +2362,10 @@ function viewNewPassword(message = "") {
 
 async function start(session) {
   state.session = session;
-  if (!session) { closeSheet(); return viewLogin(linkError || ""); }
+  if (!session) { unlocked = false; closeSheet(); return viewLogin(linkError || ""); }
   if (recovering) return viewNewPassword();
+  if (!unlocked) return viewLock();
+  if (!lockCred() && !bioOffered && await bioAvailable()) return viewBioOffer();
   $app.innerHTML = '<div class="loading">Carregando…</div>';
   try {
     await loadAll();

@@ -150,6 +150,8 @@ button { cursor: pointer; }
 .field:has(.hint) { flex-wrap: wrap; }
 .field .hint { flex-basis: 100%; color: var(--muted); font-size: 12px; margin: -6px 0 10px 116px; }
 .login .link { display: block; margin: 16px auto 0; background: none; border: 0; color: var(--accent, #0f766e); font-size: 15px; padding: 8px; }
+.login .or { text-align: center; margin: 16px 0 12px; font-size: 14px; }
+.login .secondary { width: 100%; border: 0; border-radius: 12px; background: var(--surface); color: var(--text); padding: 14px 16px; font-size: 16px; font-weight: 600; }
 .login .error { color: var(--neg); font-size: 14px; min-height: 20px; margin: 4px 0 8px; }
 
 #toast { position: fixed; left: 50%; bottom: calc(96px + var(--safe-b)); transform: translateX(-50%) translateY(20px);
