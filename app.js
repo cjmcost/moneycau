@@ -23,6 +23,8 @@ const state = {
   payeeById: new Map(),
   tags: [],
   tagById: new Map(),
+  descriptions: [], // descrições já usadas, com o beneficiário e a categoria mais comuns
+  offline: false, // abriu sem internet, com os dados salvos no aparelho
   scheduled: [],
   exceptions: new Map(), // "agendado|data original" -> exceção daquela ocorrência
   showArchived: false,
@@ -54,6 +56,7 @@ const monthLabel = (iso) => { const s = fmtMonth.format(parseDate(iso)); return 
 const signClass = (v) => (Number(v) < 0 ? "neg" : Number(v) > 0 ? "pos" : "");
 
 // Busca sem acento e sem diferenciar maiúsculas; um número em pt-BR ("19,50") também casa com o valor.
+// Sem centavos ("116"), casa com qualquer valor de 116,00 a 116,99.
 const norm = (v) => String(v ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 function queryAmount(q) {
   const s = q.replace(/^(R\$)?\s*-?/i, "");
@@ -119,24 +122,49 @@ const ICONS = {
 
 // Dados ------------------------------------------------------------------------
 
+// Uma cópia dos dados fica no aparelho para o app abrir e aceitar lançamentos sem internet.
+const CACHE_KEY = "mc.cache";
+
 async function loadAll() {
-  const [accounts, balances, categories, payees, tags] = await Promise.all([
-    must(sb.from("accounts").select("*").order("display_order")),
-    must(sb.from("account_balances").select("*")),
-    must(sb.from("categories").select("id,parent_id,name,kind,display_order").order("display_order")),
-    fetchAll(() => sb.from("payee_usage").select("id,name,default_category_id,uses,last_used")
-      .order("uses", { ascending: false }).order("id")),
-    must(sb.from("tags").select("id,name").order("name")),
-  ]);
-  setTags(tags);
-  state.accounts = accounts;
-  state.accById = new Map(accounts.map((a) => [a.id, a]));
-  state.balances = new Map(balances.map((b) => [b.account_id, b]));
-  state.categories = categories;
-  state.catById = new Map(categories.map((c) => [c.id, c]));
-  state.payees = payees;
-  state.payeeById = new Map(payees.map((p) => [p.id, p]));
-  await loadScheduled();
+  try {
+    const [accounts, balances, categories, payees, tags, descriptions] = await Promise.all([
+      must(sb.from("accounts").select("*").order("display_order")),
+      must(sb.from("account_balances").select("*")),
+      must(sb.from("categories").select("id,parent_id,name,kind,display_order").order("display_order")),
+      fetchAll(() => sb.from("payee_usage").select("id,name,default_category_id,uses,last_used")
+        .order("uses", { ascending: false }).order("id")),
+      must(sb.from("tags").select("id,name").order("name")),
+      fetchAll(() => sb.from("description_usage").select("description,uses,payee_id,payee_share,category_id")
+        .order("uses", { ascending: false }).order("description")),
+    ]);
+    await loadScheduled();
+    const data = { accounts, balances, categories, payees, tags, descriptions,
+      scheduled: state.scheduled, exceptions: [...state.exceptions.values()] };
+    applyData(data);
+    store(CACHE_KEY, JSON.stringify(data));
+    state.offline = false;
+  } catch (e) {
+    let data = null;
+    try { data = JSON.parse(store(CACHE_KEY)); } catch {}
+    if (!data) throw e;
+    applyData(data);
+    state.offline = true;
+    toast("Sem internet: dados salvos no aparelho");
+  }
+}
+
+function applyData(d) {
+  setTags(d.tags);
+  state.accounts = d.accounts;
+  state.accById = new Map(d.accounts.map((a) => [a.id, a]));
+  state.balances = new Map(d.balances.map((b) => [b.account_id, b]));
+  state.categories = d.categories;
+  state.catById = new Map(d.categories.map((c) => [c.id, c]));
+  state.payees = d.payees;
+  state.payeeById = new Map(d.payees.map((p) => [p.id, p]));
+  state.descriptions = d.descriptions || [];
+  state.scheduled = d.scheduled;
+  state.exceptions = new Map(d.exceptions.map((e) => [e.scheduled_id + "|" + e.occurrence_date, e]));
 }
 
 async function loadScheduled() {
@@ -184,7 +212,13 @@ function tabbar(active) {
 }
 
 function render(html, active) {
-  $app.innerHTML = `<main class="screen">${html}</main>${tabbar(active)}`;
+  $app.innerHTML = `<main class="screen">${netBar()}${html}</main>${tabbar(active)}`;
+}
+
+function netBar() {
+  const n = pendingList().length;
+  if (n) return `<button class="net-bar" data-action="flush">${n === 1 ? "1 lançamento feito sem internet aguarda" : `${n} lançamentos feitos sem internet aguardam`} envio. Toque para enviar agora.</button>`;
+  return state.offline ? '<div class="net-bar">Sem internet: saldos e listas podem estar desatualizados.</div>' : "";
 }
 
 // Tela: Contas -------------------------------------------------------------------
@@ -399,7 +433,9 @@ function schedMatches(s, q) {
   const n = norm(q), val = queryAmount(q);
   const text = [s.description, state.payeeById.get(s.payee_id)?.name, state.accById.get(s.account_id)?.name,
     state.accById.get(s.recipient_account_id)?.name, ...(s.scheduled_splits || []).map((x) => catLabel(x.category_id))];
-  return text.some((v) => norm(v).includes(n)) || (val !== null && Math.abs(Number(s.amount)) === val);
+  const amount = Math.abs(Number(s.amount));
+  return text.some((v) => norm(v).includes(n))
+    || (val !== null && (q.includes(",") ? amount === val : Math.trunc(amount) === val));
 }
 
 function viewScheduled() {
@@ -1685,7 +1721,8 @@ function drawEntry() {
       ${e.splits ? splitFields(e, lock) : `<div class="field"><label>Categoria</label>
         <button class="picker ${e.category || e.multiSplit ? "" : "placeholder"}" data-action="pick-cat" ${lock}>${cat}</button></div>`}` : ""}
       <div class="field"><label>${e.schedEdit ? "Próxima data" : "Data"}</label><input id="date" type="date" value="${e.date}" ${disabled}></div>
-      <div class="field"><label>Descrição</label><input id="description" value="${esc(e.description)}" placeholder="Opcional" ${lock}></div>
+      <div class="field"><label>Descrição</label><input id="description" autocomplete="off" value="${esc(e.description)}" placeholder="Opcional" ${lock}>
+        ${e.kind !== "transfer" ? '<div class="suggest" id="suggest-desc" hidden></div>' : ""}</div>
       <div class="field"><label>Tags</label>
         <button class="picker ${e.tags.length ? "" : "placeholder"}" data-action="pick-tags" ${lock}>${esc(tagNames(e.tags)) || "Opcional"}</button></div>
       ${e.schedEdit ? `<div class="field"><label>Repetição</label>
@@ -1761,9 +1798,43 @@ function payeeSuggestions(text) {
 }
 
 function choosePayee(p) {
+  readEntryFields();
   entry.payee = p.name;
   if (!entry.categoryTouched && !entry.splits && p.default_category_id) {
     const c = state.catById.get(p.default_category_id);
+    if (c && c.kind === entry.kind) entry.category = c.id;
+  }
+  drawEntry();
+}
+
+// Descrições já usadas que começam ou contêm o texto (sem acento), as mais usadas primeiro.
+function descriptionSuggestions(text) {
+  const q = norm(text.trim());
+  if (q.length < 2) return [];
+  const starts = [], contains = [];
+  for (const d of state.descriptions) {
+    const n = norm(d.description);
+    if (n === q) continue;
+    if (n.startsWith(q)) starts.push(d);
+    else if (n.includes(q)) contains.push(d);
+    if (starts.length >= 8) break;
+  }
+  return [...starts, ...contains].slice(0, 8);
+}
+
+// O beneficiário só vem junto quando é o dominante daquela descrição: descrições genéricas
+// ("Supermercado") têm dezenas de beneficiários.
+const descPayee = (d) => (Number(d.payee_share) >= 0.5 ? state.payeeById.get(d.payee_id) : null);
+const descHint = (d) => [descPayee(d)?.name, d.category_id && catLabel(d.category_id)].filter(Boolean).join(" · ");
+
+// Preenche o beneficiário (se estiver vazio) e a categoria (se não foi escolhida à mão).
+function chooseDescription(d) {
+  readEntryFields();
+  entry.description = d.description;
+  const p = descPayee(d);
+  if (p && !entry.payee.trim()) entry.payee = p.name;
+  if (!entry.categoryTouched && !entry.splits && d.category_id) {
+    const c = state.catById.get(d.category_id);
     if (c && c.kind === entry.kind) entry.category = c.id;
   }
   drawEntry();
@@ -1836,6 +1907,8 @@ async function saveEntry() {
     splits = e.splits.map((x) => ({ category_id: x.category, amount: x.cents / 100 }));
   }
 
+  if ((e.schedEdit || e.scheduled) && !navigator.onLine) return toast("Agendados precisam de internet");
+
   if (e.schedEdit && e.repeat !== "none" && e.total && e.total <= e.done)
     return toast(`O total precisa ser maior que ${e.done}, que já passaram`);
 
@@ -1855,14 +1928,22 @@ async function saveEntry() {
   } else if (e.scheduled) {
     await must(sb.rpc("execute_scheduled", { p_id: e.scheduled, p_date: e.date, p_amount: e.cents / 100 }));
   } else {
-    await must(sb.rpc("save_entry", {
-      p_id: e.id, p_kind: e.kind, p_account: e.account, p_amount: e.cents / 100, p_date: e.date,
+    const queued = await saveOrQueue({
+      // lançamento novo já sai com id: se for reenviado, substitui em vez de duplicar
+      p_id: e.id || crypto.randomUUID(), p_kind: e.kind, p_account: e.account, p_amount: e.cents / 100, p_date: e.date,
       p_payee_name: e.kind === "transfer" ? null : e.payee || null,
       p_category: e.kind === "transfer" ? null : e.category,
       p_description: e.description || null, p_notes: e.notes || null,
       p_to_account: e.kind === "transfer" ? e.toAccount : null,
       p_to_amount: fx ? e.toCents / 100 : null, p_tags: e.tags, p_splits: splits,
-    }));
+    });
+    if (queued) {
+      store("mc.last." + e.kind, e.account);
+      if (e.kind === "transfer") store("mc.last.transfer.to", e.toAccount);
+      closeSheet();
+      toast("Sem internet: lançamento guardado");
+      return route();
+    }
   }
   store("mc.last." + e.kind, e.account);
   if (e.kind === "transfer") store("mc.last.transfer.to", e.toAccount);
@@ -1871,6 +1952,52 @@ async function saveEntry() {
   toast(e.schedEdit ? "Agendado salvo" : e.scheduled ? "Agendado lançado" : "Lançamento salvo");
   await afterChange(wasScheduled);
 }
+
+// Lançamentos feitos sem internet ------------------------------------------------
+// Ficam no aparelho (mc.pending) com os parâmetros do save_entry e vão para o servidor
+// quando a conexão volta. Como cada um tem id próprio, reenviar não duplica.
+const PENDING_KEY = "mc.pending";
+const isNetworkError = (err) => !navigator.onLine || /fetch|load failed|network|abort|time ?out/i.test(err?.message || "");
+function pendingList() {
+  try { return JSON.parse(store(PENDING_KEY)) || []; } catch { return []; }
+}
+const setPending = (list) => store(PENDING_KEY, JSON.stringify(list));
+
+// → true se ficou guardado para enviar depois.
+async function saveOrQueue(params) {
+  const { error } = navigator.onLine
+    ? await sb.rpc("save_entry", params).abortSignal(AbortSignal.timeout(15000))
+    : { error: { message: "offline" } };
+  if (!error) return false;
+  if (!isNetworkError(error)) { toast("Erro: " + error.message); throw error; }
+  setPending([...pendingList().filter((x) => x.p_id !== params.p_id), params]);
+  return true;
+}
+
+let flushing = false;
+async function flushPending() {
+  if (flushing || !state.session || !unlocked || !navigator.onLine || !pendingList().length) return;
+  flushing = true;
+  let sent = 0, failed = null;
+  try {
+    for (const params of pendingList()) {
+      const { error } = await sb.rpc("save_entry", params);
+      if (error) { failed = error; if (isNetworkError(error)) break; continue; }
+      setPending(pendingList().filter((x) => x.p_id !== params.p_id));
+      sent++;
+    }
+  } finally { flushing = false; }
+  if (failed && !isNetworkError(failed)) toast("Pendente não enviado: " + failed.message);
+  else if (sent) toast(sent === 1 ? "Lançamento pendente enviado" : `${sent} lançamentos pendentes enviados`);
+  else if (failed) toast("Ainda sem conexão com o servidor");
+  if (sent && !entry) await afterChange(false).catch(() => {});
+}
+
+window.addEventListener("online", () => setTimeout(async () => {
+  if (!state.session || !unlocked) return;
+  if (state.offline) { await loadAll().catch(() => {}); if (!entry) route(); }
+  await flushPending();
+}, 1500));
 
 async function afterChange(scheduledChanged) {
   const tasks = [refreshBalances()];
@@ -1944,14 +2071,21 @@ async function editScheduled(id) {
 document.addEventListener("click", async (ev) => {
   const el = ev.target.closest("[data-go],[data-action]");
   if (!el) {
-    const sg = document.getElementById("suggest");
-    if (sg && !ev.target.closest(".field")) sg.hidden = true;
+    if (!ev.target.closest(".field")) document.querySelectorAll(".suggest").forEach((sg) => { sg.hidden = true; });
     return;
   }
   if (el.dataset.go) return go(el.dataset.go);
   const id = el.dataset.id;
   switch (el.dataset.action) {
-    case "new": return openEntry();
+    case "new": {
+      // dentro de uma conta, o lançamento já abre nela
+      const [, name, arg] = location.hash.split("/");
+      return openEntry(name === "conta" && validAccount(arg) ? { account: arg } : {});
+    }
+    case "flush":
+      if (!navigator.onLine) return toast("Ainda sem internet");
+      return flushPending();
+    case "desc": return chooseDescription(entry.descList[Number(el.dataset.i)]);
     case "close": return closeSheet();
     case "save": el.disabled = true; try { await saveEntry(); } finally { el.disabled = false; } return;
     case "kind":
@@ -2166,6 +2300,12 @@ document.addEventListener("input", (ev) => {
     const list = payeeSuggestions(t.value);
     box.innerHTML = list.map((p) => `<button data-action="payee" data-id="${p.id}">${esc(p.name)}${p.default_category_id ? `<small>${esc(catLabel(p.default_category_id))}</small>` : ""}</button>`).join("");
     box.hidden = !list.length;
+  } else if (t.id === "description" && entry.kind !== "transfer") {
+    entry.description = t.value;
+    const box = document.getElementById("suggest-desc");
+    entry.descList = descriptionSuggestions(t.value);
+    box.innerHTML = entry.descList.map((d, i) => `<button data-action="desc" data-i="${i}">${esc(d.description)}${descHint(d) ? `<small>${esc(descHint(d))}</small>` : ""}</button>`).join("");
+    box.hidden = !entry.descList.length;
   }
 });
 
@@ -2301,6 +2441,7 @@ function viewBioOffer() {
 // Voltar ao app depois de 5 minutos fora bloqueia de novo.
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) { hiddenAt = Date.now(); return; }
+  flushPending();
   if (unlocked && state.session && !recovering && hiddenAt && Date.now() - hiddenAt > LOCK_AFTER) {
     unlocked = false;
     viewLock();
@@ -2370,6 +2511,7 @@ async function start(session) {
   try {
     await loadAll();
     route();
+    flushPending();
   } catch (e) {
     $app.innerHTML = `<div class="loading">Não foi possível carregar os dados.<br><button class="more" onclick="location.reload()">Tentar de novo</button></div>`;
   }
@@ -2384,6 +2526,7 @@ sb.auth.onAuthStateChange((event, session) => {
     state.session = session;
     setTimeout(() => viewNewPassword(), 0);
   } else if (event === "INITIAL_SESSION" || event === "SIGNED_IN" && !started || event === "SIGNED_OUT") {
+    if (event === "SIGNED_OUT") try { localStorage.removeItem(CACHE_KEY); } catch {}
     started = !!session;
     setTimeout(() => start(session), 0);
   } else {

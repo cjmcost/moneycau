@@ -290,3 +290,7 @@ button { cursor: pointer; }
 .link-inline { border: 0; background: none; color: var(--accent); padding: 8px 0 0; font-size: 14px; }
 .warn-text { color: var(--neg); }
 .check-diff { margin-top: 12px; }
+
+/* Aviso de lançamentos feitos sem internet / app aberto sem internet */
+.net-bar { display: block; width: 100%; margin: 0 0 12px; padding: 10px 14px; border: 0; border-radius: var(--radius);
+  background: color-mix(in srgb, #d97706 16%, var(--surface)); color: var(--text); font-size: 14px; text-align: left; }
