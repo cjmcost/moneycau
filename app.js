@@ -2361,6 +2361,9 @@ window.addEventListener("hashchange", route);
 const LOCK_AFTER = 5 * 60 * 1000;
 const LOCK_KEY = "mc-lock-cred"; // id da chave do aparelho, em base64url
 let unlocked = false, hiddenAt = 0, bioOffered = false;
+// A chave guardada não funcionou (apagada do aparelho, por exemplo): depois da senha, o app
+// oferece cadastrar de novo. A chave antiga só é trocada se o novo cadastro der certo.
+let bioFailed = false;
 const lockCred = () => { try { return localStorage.getItem(LOCK_KEY); } catch { return null; } };
 const b64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const fromB64url = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
@@ -2410,7 +2413,7 @@ function viewLock(message = "") {
     <button class="link" type="button" id="lock-out">Sair desta conta</button></form>`;
   document.getElementById("bio")?.addEventListener("click", async () => {
     try { await verifyBio(); unlock(); }
-    catch { viewLock("Não foi possível confirmar. Tente de novo ou use a senha."); }
+    catch { bioFailed = true; viewLock("Não foi possível confirmar. Use a senha: em seguida, dá para cadastrar o Face ID / Touch ID de novo."); }
   });
   document.getElementById("unlock").addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -2427,11 +2430,12 @@ function viewBioOffer() {
   bioOffered = true;
   $app.innerHTML = `<div class="login">
     <h1>Desbloqueio rápido</h1>
-    <p>Quer usar o Face ID (iPhone) ou o Touch ID (Mac) para abrir o MoneyCau, em vez de digitar a senha?</p>
+    <p>${bioFailed ? "O Face ID / Touch ID cadastrado não foi encontrado neste aparelho. Quer cadastrar de novo?"
+      : "Quer usar o Face ID (iPhone) ou o Touch ID (Mac) para abrir o MoneyCau, em vez de digitar a senha?"}</p>
     <button class="primary" type="button" id="bio-yes">Usar Face ID / Touch ID</button>
     <button class="link" type="button" id="bio-no">Agora não</button></div>`;
   document.getElementById("bio-yes").addEventListener("click", async () => {
-    try { await enrollBio(); toast("Pronto: da próxima vez, use o Face ID / Touch ID"); }
+    try { await enrollBio(); bioFailed = false; toast("Pronto: da próxima vez, use o Face ID / Touch ID"); }
     catch { toast("Não foi possível ativar agora. Dá para ativar depois em Mais."); }
     start(state.session);
   });
@@ -2506,7 +2510,7 @@ async function start(session) {
   if (!session) { unlocked = false; closeSheet(); return viewLogin(linkError || ""); }
   if (recovering) return viewNewPassword();
   if (!unlocked) return viewLock();
-  if (!lockCred() && !bioOffered && await bioAvailable()) return viewBioOffer();
+  if ((!lockCred() || bioFailed) && !bioOffered && await bioAvailable()) return viewBioOffer();
   $app.innerHTML = '<div class="loading">Carregando…</div>';
   try {
     await loadAll();
