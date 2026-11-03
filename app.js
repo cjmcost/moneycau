@@ -293,7 +293,7 @@ function txRow(t, { withAccount = false, running = null, currency = "BRL" } = {}
     <div class="main"><div class="title">${esc(txTitle(t))}${fut ? '<span class="badge">previsto</span>' : ""}</div>
       <div class="meta">${dayLabel(t.date)}${txMeta(t, withAccount) ? " · " + esc(txMeta(t, withAccount)) : ""}</div></div>
     <div class="amount ${signClass(t.amount)}">${money(t.amount, currency)}
-      ${running !== null ? `<small>${money(running, currency)}</small>` : ""}</div>
+      ${running !== null ? `<small class="${running < -0.004 ? "bal-neg" : ""}">${money(running, currency)}</small>` : ""}</div>
   </button>`;
 }
 
@@ -1043,7 +1043,7 @@ function occRow(o, s, amount, running, withAccount) {
   return `<button class="row" data-action="occ" data-id="${s.id}" data-date="${o.occurrence_date}">
     <div class="main"><div class="title">${esc(title)}<span class="badge">agendado</span>${o.changed ? '<span class="badge">alterado</span>' : ""}${o.date < today() ? '<span class="badge warn">vencido</span>' : ""}</div>
       <div class="meta">${esc(meta)}</div></div>
-    <div class="amount ${signClass(amount)}">${money(amount, s.currency)}${running !== null ? `<small>${money(running)}</small>` : ""}</div>
+    <div class="amount ${signClass(amount)}">${money(amount, s.currency)}${running !== null ? `<small class="${running < -0.004 ? "bal-neg" : ""}">${money(running)}</small>` : ""}</div>
   </button>`;
 }
 

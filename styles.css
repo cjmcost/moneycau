@@ -8,6 +8,7 @@
   --accent: #0f766e;
   --accent-soft: #ccfbf1;
   --neg: #c2410c;
+  --bal-neg: #dc2626; /* saldo projetado negativo */
   --pos: #15803d;
   --warn: #b45309;
   --warn-soft: #fef3c7;
@@ -27,6 +28,7 @@
     --accent: #2dd4bf;
     --accent-soft: #134e4a;
     --neg: #fb923c;
+    --bal-neg: #f87171;
     --pos: #4ade80;
     --warn: #fbbf24;
     --warn-soft: #422006;
@@ -65,6 +67,7 @@ button { cursor: pointer; }
 .row .meta { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row .amount { font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
 .row .amount small { display: block; color: var(--muted); font-size: 12px; }
+.row .amount small.bal-neg { color: var(--bal-neg); font-weight: 700; }
 .neg { color: var(--neg); }
 .pos { color: var(--pos); }
 .future { opacity: 0.6; }
