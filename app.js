@@ -297,13 +297,15 @@ function txRow(t, { withAccount = false, running = null, currency = "BRL" } = {}
   </button>`;
 }
 
-function groupByMonth(rows, rowHtml) {
+// monthEnd (opcional) devolve o texto à direita do mês; é chamado antes do primeiro
+// lançamento do mês (o mais recente), quando o saldo corrente ainda é o do fim do mês.
+function groupByMonth(rows, rowHtml, monthEnd = null) {
   let html = "", month = null, buf = "";
   rows.forEach((t, i) => {
     const m = t.date.slice(0, 7);
     if (m !== month) {
       if (buf) html += `<div class="list">${buf}</div>`;
-      html += `<div class="section-title"><span>${monthLabel(t.date)}</span></div>`;
+      html += `<div class="section-title"><span>${monthLabel(t.date)}</span>${monthEnd ? monthEnd() : ""}</div>`;
       month = m; buf = "";
     }
     buf += rowHtml(t, i);
@@ -335,7 +337,7 @@ async function viewAccount(id) {
       return groupByMonth(rows, (t) => {
         const r = running; running -= Number(t.amount);
         return txRow(t, { running: q ? null : r, currency: a.currency });
-      });
+      }, q ? null : () => `<span class="${running < -0.004 ? "bal-neg" : ""}">${money(running, a.currency)}</span>`);
     },
   });
 }

@@ -208,6 +208,7 @@ button { cursor: pointer; }
 .chart .tick { stroke: var(--line); }
 .forecast .row.future { opacity: 1; }
 .section-title .neg { color: var(--neg); }
+.section-title .bal-neg { color: var(--bal-neg); font-weight: 700; }
 .amount.muted { color: var(--muted); text-decoration: line-through; }
 
 /* faturas de cartão: cores dos cartões na ordem do relatório (paleta categórica validada) */
