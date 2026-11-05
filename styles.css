@@ -113,6 +113,12 @@ button { cursor: pointer; }
   font-size: 36px; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; margin-bottom: 12px; outline: none; }
 .amount-input.expense { color: var(--neg); }
 .amount-input.income { color: var(--pos); }
+.amount-row { display: flex; gap: 8px; align-items: stretch; margin-bottom: 12px; }
+.amount-row .amount-input { flex: 1; min-width: 0; margin-bottom: 0; }
+.sign-toggle { width: 56px; flex-shrink: 0; border: 0; border-radius: var(--radius); background: var(--surface);
+  color: var(--muted); font-size: 26px; }
+.sign-toggle.on { background: var(--bal-neg); color: #fff; }
+.reverse-hint { color: var(--bal-neg); font-size: 13px; font-weight: 600; margin: -4px 4px 12px; }
 
 .form { background: var(--surface); border-radius: var(--radius); overflow: visible; margin-bottom: 12px; }
 .field { display: flex; align-items: center; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--line);

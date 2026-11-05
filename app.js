@@ -1648,6 +1648,9 @@ function accountOptions(selected) {
 }
 
 const centsToText = (cents) => money(cents / 100).replace(/^R\$\s?/, "");
+// Sinal invertido (receita negativa, despesa positiva) só vale para despesa e receita.
+const reversed = (e) => e.reverse && e.kind !== "transfer";
+const amountText = (e) => (reversed(e) ? (e.kind === "income" ? "-" : "+") : "") + centsToText(e.cents);
 
 function openEntry(init = {}) {
   const kind = init.kind || "expense";
@@ -1655,6 +1658,7 @@ function openEntry(init = {}) {
     id: init.id || null,
     kind,
     cents: init.cents || 0,
+    reverse: !!init.reverse, // receita negativa ou despesa positiva
     toCents: init.toCents || 0,
     account: init.account || validAccount(store("mc.last." + kind)) || validAccount(store("mc.last.expense")) || defaultAccount(),
     toAccount: init.toAccount || store("mc.last.transfer.to") || null,
@@ -1709,7 +1713,11 @@ function drawEntry() {
       ${[["expense", "Despesa"], ["income", "Receita"], ["transfer", "Transferência"]].map(([k, l]) =>
         `<button class="${e.kind === k ? "on" : ""}" data-action="kind" data-kind="${k}" ${disabled || (e.scheduled ? "disabled" : "")}>${l}</button>`).join("")}
     </div>
-    <input id="amount" class="amount-input ${e.kind}" inputmode="numeric" autocomplete="off" value="${centsToText(e.cents)}" ${disabled}>
+    <div class="amount-row">
+      <input id="amount" class="amount-input ${reversed(e) ? (e.kind === "income" ? "expense" : "income") : e.kind}" inputmode="numeric" autocomplete="off" value="${amountText(e)}" ${disabled}>
+      ${e.kind !== "transfer" && !e.scheduled && !e.schedEdit ? `<button class="sign-toggle ${reversed(e) ? "on" : ""}" data-action="reverse" aria-label="Inverter o sinal" aria-pressed="${reversed(e)}" ${disabled}>±</button>` : ""}
+    </div>
+    ${reversed(e) ? `<div class="reverse-hint">${e.kind === "income" ? "Receita negativa: reduz a receita da categoria." : "Despesa positiva (estorno): reduz a despesa da categoria."}</div>` : ""}
     <div class="form">
       <div class="field"><label>${e.kind === "transfer" ? "De" : "Conta"}</label>
         <select id="account" ${lock}>${accountOptions(e.account)}</select></div>
@@ -1937,7 +1945,7 @@ async function saveEntry() {
       p_category: e.kind === "transfer" ? null : e.category,
       p_description: e.description || null, p_notes: e.notes || null,
       p_to_account: e.kind === "transfer" ? e.toAccount : null,
-      p_to_amount: fx ? e.toCents / 100 : null, p_tags: e.tags, p_splits: splits,
+      p_to_amount: fx ? e.toCents / 100 : null, p_tags: e.tags, p_splits: splits, p_reverse: reversed(e),
     });
     if (queued) {
       store("mc.last." + e.kind, e.account);
@@ -2032,6 +2040,7 @@ async function openTransaction(id) {
     readOnly = "Esta divisão mistura entradas e saídas (veio do MoneyWiz) e por enquanto só pode ser apagada.";
   openEntry({ ...base, kind: t.kind === "income" ? "income" : "expense", account: t.account_id,
     cents: Math.round(Math.abs(t.amount) * 100), payee: state.payeeById.get(t.payee_id)?.name || "",
+    reverse: t.kind === "income" ? Number(t.amount) < 0 : Number(t.amount) > 0,
     category: splits.length === 1 ? splits[0].category_id : null,
     splits: splits.length > 1 ? splitsFrom(splits) : null, readOnly });
 }
@@ -2084,6 +2093,7 @@ document.addEventListener("click", async (ev) => {
       const [, name, arg] = location.hash.split("/");
       return openEntry(name === "conta" && validAccount(arg) ? { account: arg } : {});
     }
+    case "reverse": readEntryFields(); entry.reverse = !entry.reverse; return drawEntry();
     case "flush":
       if (!navigator.onLine) return toast("Ainda sem internet");
       return flushPending();
@@ -2289,7 +2299,7 @@ document.addEventListener("input", (ev) => {
   if (t.id === "amount" || t.id === "toAmount") {
     const cents = Math.min(Number(t.value.replace(/\D/g, "") || 0), 99999999999);
     entry[t.id === "amount" ? "cents" : "toCents"] = cents;
-    t.value = centsToText(cents);
+    t.value = t.id === "amount" ? amountText(entry) : centsToText(cents);
     if (entry.splits && t.id === "amount") document.getElementById("split-sum").innerHTML = splitSumText(entry);
   } else if (t.classList.contains("split-amount")) {
     const cents = Math.min(Number(t.value.replace(/\D/g, "") || 0), 99999999999);
