@@ -1650,6 +1650,8 @@ function accountOptions(selected) {
 const centsToText = (cents) => money(cents / 100).replace(/^R\$\s?/, "");
 // Sinal invertido (receita negativa, despesa positiva) só vale para despesa e receita.
 const reversed = (e) => e.reverse && e.kind !== "transfer";
+// agendado com sinal invertido: despesa com valor positivo ou receita com valor negativo
+const schedReversed = (s) => (s.kind === "expense" && s.amount > 0) || (s.kind === "income" && s.amount < 0);
 const amountText = (e) => (reversed(e) ? (e.kind === "income" ? "-" : "+") : "") + centsToText(e.cents);
 
 function openEntry(init = {}) {
@@ -1727,7 +1729,7 @@ function drawEntry() {
     </div>
     <div class="amount-row">
       <input id="amount" class="amount-input ${reversed(e) ? (e.kind === "income" ? "expense" : "income") : e.kind}" inputmode="numeric" autocomplete="off" value="${amountText(e)}" ${disabled}>
-      ${e.kind !== "transfer" && !e.scheduled && !e.schedEdit ? `<button class="sign-toggle ${reversed(e) ? "on" : ""}" data-action="reverse" aria-label="Inverter o sinal" aria-pressed="${reversed(e)}" ${disabled}>±</button>` : ""}
+      ${e.kind !== "transfer" && !e.scheduled ? `<button class="sign-toggle ${reversed(e) ? "on" : ""}" data-action="reverse" aria-label="Inverter o sinal" aria-pressed="${reversed(e)}" ${disabled}>±</button>` : ""}
     </div>
     ${reversed(e) ? `<div class="reverse-hint">${e.kind === "income" ? "Receita negativa: reduz a receita da categoria." : "Despesa positiva (estorno): reduz a despesa da categoria."}</div>` : ""}
     <div class="form">
@@ -1944,7 +1946,7 @@ async function saveEntry() {
       p_description: e.description || null,
       p_to_account: e.kind === "transfer" ? e.toAccount : null,
       p_repeatable: e.repeat !== "none", p_unit: unit, p_count: Number(count),
-      p_total: e.repeat === "none" ? null : e.total, p_splits: splits,
+      p_total: e.repeat === "none" ? null : e.total, p_splits: splits, p_reverse: reversed(e),
     }));
     await must(sb.from("scheduled_tags").delete().eq("scheduled_id", sid));
     if (e.tags.length) await must(sb.from("scheduled_tags").insert(e.tags.map((tag_id) => ({ scheduled_id: sid, tag_id }))));
@@ -2070,7 +2072,7 @@ function openScheduled(id) {
     toAccount: fromIsAccount ? s.recipient_account_id : s.account_id,
     payee: state.payeeById.get(s.payee_id)?.name || "", description: s.description || "",
     category: splits.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))[0]?.category_id || null,
-    multiSplit: splits.length > 1 ? splits.length : 0 });
+    multiSplit: splits.length > 1 ? splits.length : 0, reverse: schedReversed(s) });
 }
 
 async function editScheduled(id) {
@@ -2087,7 +2089,7 @@ async function editScheduled(id) {
     payee: state.payeeById.get(s.payee_id)?.name || "", description: s.description || "",
     category: splits.length === 1 ? splits[0].category_id : null, splits: splits.length > 1 ? splitsFrom(splits) : null,
     repeat: s.repeatable ? `${s.interval_unit}:${s.interval_count}` : "none", total, done, upcoming,
-    tags: (s.scheduled_tags || []).map((x) => x.tag_id) });
+    tags: (s.scheduled_tags || []).map((x) => x.tag_id), reverse: schedReversed(s) });
 }
 
 // Eventos ----------------------------------------------------------------------
