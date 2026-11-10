@@ -1688,6 +1688,18 @@ function openEntry(init = {}) {
   if (!entry.id && !entry.readOnly) setTimeout(() => document.getElementById("amount")?.focus(), 250);
 }
 
+// Novo lançamento com tudo do que está aberto (conta, beneficiário, categoria ou divisão,
+// descrição, notas, tags, sinal), com a data de hoje. O original não muda.
+function duplicateEntry() {
+  readEntryFields();
+  const e = entry;
+  openEntry({ kind: e.kind, cents: e.cents, toCents: e.toCents, reverse: e.reverse, account: e.account, toAccount: e.toAccount,
+    payee: e.payee, category: e.category, description: e.description, notes: e.notes, tags: [...e.tags],
+    splits: e.splits ? e.splits.map((x) => ({ ...x })) : null, date: today() });
+  toast("Cópia: ajuste data e valor e salve");
+  setTimeout(() => document.getElementById("amount")?.select(), 300);
+}
+
 function closeSheet() { $sheet.innerHTML = ""; entry = null; occ = null; rep = null; chk = null; }
 
 function drawEntry() {
@@ -1742,6 +1754,7 @@ function drawEntry() {
         ${e.done ? `<div class="hint">A próxima é a parcela ${e.done + 1}. Deixe em branco se não tiver fim.</div>`
           : '<div class="hint">Total de parcelas. Deixe em branco se não tiver fim.</div>'}</div>` : ""}` : ""}
     </div>
+    ${e.id && !e.readOnly ? '<button class="more" data-action="dup-entry">Duplicar lançamento</button>' : ""}
     ${e.id ? '<button class="danger" data-action="delete">Apagar lançamento</button>' : ""}
     ${e.scheduled ? '<button class="danger" data-action="skip-sched">Pular esta ocorrência</button>' : ""}
     ${e.upcoming?.length ? `<div class="section-title"><span>Próximas datas</span></div>
@@ -2171,6 +2184,7 @@ document.addEventListener("click", async (ev) => {
       await saveOccurrence({ p_skip: true }); return toast("Data pulada");
     case "occ-dup": return duplicateScheduled(occ.s, document.getElementById("occ-date").value || occ.date, occ.cents);
     case "occ-series": { const sid = occ.s.id; closeSheet(); return editScheduled(sid); }
+    case "dup-entry": return duplicateEntry();
     case "dup-sched": { const s = state.scheduled.find((x) => x.id === entry.schedId); return duplicateScheduled(s, s.next_date, entry.cents); }
     case "fc-months": {
       const r = state.reports.find((x) => x.id === id);
