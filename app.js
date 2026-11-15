@@ -358,11 +358,20 @@ async function showLastBalanceCheck(id) {
 // assim voltar de uma edição não a perde.
 const lastQuery = () => (state.search?.hash === location.hash ? state.search.q : "");
 
-async function txList({ load, rowsHtml }) {
+async function txList({ load, rowsHtml, search = null, onQuery = null }) {
   let rows = [], q = lastQuery(), gen = 0;
   const $list = document.getElementById("tx-list");
   const loadPage = async () => {
     const g = gen;
+    onQuery?.(q);
+    if (q && search) {
+      pageLoader = null;
+      $list.innerHTML = '<div class="empty">Buscando…</div>';
+      const html = await search(q);
+      if (g === gen && $list.isConnected) $list.innerHTML = html;
+      return;
+    }
+    pageLoader = loadPage;
     const page = await must(load(q).order("date", { ascending: false }).order("created_at", { ascending: false })
       .range(rows.length, rows.length + PAGE - 1));
     if (g !== gen || !$list.isConnected) return; // a busca mudou ou a tela já é outra
@@ -371,22 +380,74 @@ async function txList({ load, rowsHtml }) {
     $list.innerHTML = (rows.length ? rowsHtml(rows, q) : `<div class="empty">${q ? "Nada encontrado." : "Nenhum lançamento."}</div>`) +
       (page.length === PAGE ? '<button class="more" data-action="more">Carregar mais</button>' : "");
   };
-  pageLoader = loadPage;
   onSearch((v) => { q = v; state.search = { hash: location.hash, q }; gen++; rows = []; loadPage(); });
   await loadPage();
 }
 
-// Tela: Recentes -----------------------------------------------------------------
+// Tela: Todas as operações ---------------------------------------------------------
+// Sem busca, os últimos lançamentos de todas as contas. Com busca, tudo o que casa, sem
+// paginar, junto com as ocorrências futuras dos agendados que casam (as parcelas que
+// faltam) e o total no topo, como o "Todas as operações" do MoneyWiz.
 
-async function viewRecent() {
+const ALL_OPS_HORIZON = 12; // meses de previsão para séries sem fim
+
+async function viewAllOps() {
   render(`<div class="topbar"><button class="back" data-go="#/mais">‹ Mais</button></div>
-    <div class="topbar"><h1>Recentes</h1></div>
-    ${searchBox("Buscar em todas as contas", lastQuery())}<div id="tx-list"></div>`, "mais");
+    <div class="topbar"><h1>Todas as operações</h1></div>
+    ${searchBox("Buscar descrição, beneficiário, categoria, tag ou valor", lastQuery())}<div id="ops-total"></div><div id="tx-list"></div>`, "mais");
   await txList({
-    load: (q) => q ? sb.rpc("search_transactions", { p_query: q }).select(TX_SELECT)
-      : sb.from("transactions").select(TX_SELECT).lte("date", today()).neq("kind", "transfer_in"),
+    load: () => sb.from("transactions").select(TX_SELECT).lte("date", today()).neq("kind", "transfer_in"),
     rowsHtml: (rows) => groupByMonth(rows, (t) => txRow(t, { withAccount: true, currency: state.accById.get(t.account_id)?.currency })),
+    search: searchAllOps,
+    onQuery: (q) => { if (!q) document.getElementById("ops-total").innerHTML = ""; },
   });
+}
+
+async function searchAllOps(q) {
+  const t0 = today();
+  const cap = (() => { const d = new Date(); return monthEnd(`${d.getFullYear() + 5}-${pad(d.getMonth() + 1)}-01`); })();
+  const endless = (() => { const d = new Date(); const m = new Date(d.getFullYear(), d.getMonth() + ALL_OPS_HORIZON, 1);
+    return monthEnd(`${m.getFullYear()}-${pad(m.getMonth() + 1)}-01`); })();
+  const scheds = new Map(state.scheduled.filter((s) => !s.disabled && schedMatches(s, q)).map((s) => {
+    const until = !s.repeatable ? s.next_date : s.end_date ? (s.end_date < cap ? s.end_date : cap) : endless;
+    return [s.id, { s, until }];
+  }));
+  const maxUntil = [...scheds.values()].reduce((m, x) => (x.until > m ? x.until : m), t0);
+  const [txs, occs] = await Promise.all([
+    fetchAll(() => sb.rpc("search_transactions", { p_query: q }).select(TX_SELECT)
+      .order("date", { ascending: false }).order("created_at", { ascending: false })),
+    scheds.size ? fetchAll(() => sb.rpc("scheduled_occurrences", { p_from: "2000-01-01", p_to: maxUntil })) : [],
+  ]);
+  txs.forEach((t) => txCache.set(t.id, t));
+  const items = txs.map((t) => ({ date: t.date, tx: t, amount: Number(t.amount), currency: state.accById.get(t.account_id)?.currency || "BRL",
+    transfer: t.kind === "transfer_out", future: t.date > t0 }));
+  let endlessHit = false;
+  for (const o of occs) {
+    const m = scheds.get(o.scheduled_id);
+    if (!m || o.skipped || o.date > m.until) continue;
+    if (m.s.repeatable && !m.s.end_date) endlessHit = true;
+    items.push({ date: o.date, occ: o, s: m.s, amount: Number(o.amount), currency: m.s.currency || "BRL",
+      transfer: m.s.kind === "transfer", future: true });
+  }
+  items.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+
+  let done = 0, planned = 0, left = 0;
+  for (const it of items) {
+    if (it.transfer || it.currency !== "BRL") { left++; continue; }
+    if (it.future) planned += it.amount; else done += it.amount;
+  }
+  const notes = [`${items.length} ${items.length === 1 ? "operação" : "operações"}`];
+  if (left) notes.push("transferências e outras moedas ficam fora do total");
+  if (endlessHit) notes.push(`séries sem fim contam os próximos ${ALL_OPS_HORIZON} meses`);
+  const $total = document.getElementById("ops-total");
+  if ($total) $total.innerHTML = items.length ? `<div class="hero"><div class="label">Total</div>
+      <div class="value ${signClass(done + planned)}">${money(done + planned)}</div>
+      <div class="sub">Realizado ${money(done)} · Previsto ${money(planned)}</div>
+      <div class="sub">${esc(notes.join(" · "))}</div></div>` : "";
+  return items.length ? groupByMonth(items, (it) => it.tx
+      ? txRow(it.tx, { withAccount: true, currency: it.currency })
+      : occRow(it.occ, it.s, it.amount, null, true))
+    : '<div class="empty">Nada encontrado.</div>';
 }
 
 // Tela: Agendados ----------------------------------------------------------------
@@ -574,8 +635,8 @@ function viewMore() {
       <button class="row" data-action="bio-toggle"><div class="main"><div class="title">Desbloquear com Face ID / Touch ID</div>
         <div class="meta">${lockCred() ? "Ativado neste aparelho. Toque para desativar." : "Desativado. Sem ele, o app pede a senha ao abrir."}</div></div></button>
       <button class="row" data-action="reload"><div class="main"><div class="title">Atualizar dados</div></div></button>
-      <button class="row" data-go="#/recentes"><div class="main"><div class="title">Recentes</div>
-        <div class="meta">Últimos lançamentos de todas as contas</div></div><span class="chev">›</span></button>
+      <button class="row" data-go="#/operacoes"><div class="main"><div class="title">Todas as operações</div>
+        <div class="meta">Busca em todas as contas e meses, com parcelas futuras e total</div></div><span class="chev">›</span></button>
       <button class="row" data-go="#/orcamento"><div class="main"><div class="title">Exportar para o Orçamento</div>
         <div class="meta">Resumo do mês em CSV, no formato do MoneyWiz</div></div><span class="chev">›</span></button>
     </div>
@@ -2371,7 +2432,8 @@ function route() {
   switch (name) {
     case "conta": return viewAccount(arg);
     case "agendados": return viewScheduled();
-    case "recentes": return viewRecent();
+    case "operacoes":
+    case "recentes": return viewAllOps();
     case "mais": return viewMore();
     case "orcamento": return viewBudget();
     case "relatorios": return viewReports();
