@@ -485,7 +485,7 @@ function scheduledRow(s) {
   const meta = [dayLabel(next.date), (acc?.name || "sem conta") + (to ? " → " + to.name : "")].join(" · ");
   const parc = installment(s);
   return `<div class="row">
-    <div class="main" data-action="edit-sched" data-id="${s.id}"><div class="title">${esc(schedTitle(s))}${parc ? `<span class="badge">${parc}</span>` : ""}${next.changed ? '<span class="badge">alterado</span>' : ""}${late ? '<span class="badge warn">vencido</span>' : ""}</div>
+    <div class="main" ${next.changed ? `data-action="occ" data-date="${s.next_date}"` : 'data-action="edit-sched"'} data-id="${s.id}"><div class="title">${esc(schedTitle(s))}${parc ? `<span class="badge">${parc}</span>` : ""}${next.changed ? '<span class="badge">alterado</span>' : ""}${late ? '<span class="badge warn">vencido</span>' : ""}</div>
       <div class="meta">${esc(meta)}</div></div>
     <div class="amount ${signClass(next.amount)}">${money(next.amount, s.currency)}</div>
     <div class="actions"><button class="btn-ok" data-action="confirm-sched" data-id="${s.id}">Lançar</button></div>
