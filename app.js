@@ -934,7 +934,7 @@ const repAccounts = () => state.accounts.filter((a) => rep.type !== "cards" || a
 function drawReportEditor() {
   const e = rep;
   const base = e.type === "monthly" ? MONTHLY_PERIODS : SUMMARY_PERIODS;
-  const periods = e.period === "fixed" ? [...base, ["fixed", `Datas fixas (${periodLabel({ from: e.from, to: e.to })})`]] : base;
+  const periods = [...base, ["fixed", "Datas personalizadas"]];
   const nTag = e.tags ? e.tags.size : null;
   const opts = (list, cur) => list.map(([v, l]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${l}</option>`).join("");
   const byMonth = e.type === "monthly", withCats = e.type === "summary" || (byMonth && e.measure !== "transfers");
@@ -953,6 +953,8 @@ function drawReportEditor() {
       ${e.type === "networth" ? `<div class="field"><label>De</label><input id="rep-from-year" inputmode="numeric" maxlength="4" autocomplete="off" value="${e.from.slice(0, 4)}"></div>
       <div class="field"><label>Até</label><input id="rep-to-year" inputmode="numeric" maxlength="4" autocomplete="off" value="${e.to.slice(0, 4)}"></div>`
       : e.type === "summary" || byMonth ? `<div class="field"><label>Período</label><select id="rep-period">${opts(periods, e.period)}</select></div>
+      ${e.period === "fixed" ? `<div class="field"><label>De</label><input type="date" id="rep-from" value="${e.from || today()}"></div>
+      <div class="field"><label>Até</label><input type="date" id="rep-to" value="${e.to || today()}"></div>` : ""}
       <label class="field check"><span class="grow">Incluir agendados previstos</span><input type="checkbox" id="rep-scheduled" ${e.scheduled ? "checked" : ""}></label>`
       : `<div class="field"><label>Período</label><select id="rep-months">${months.map((n) =>
         `<option value="${n}" ${String(e.months) === String(n) ? "selected" : ""}>${n === "year" ? "Este ano" : `${e.type === "cards" ? "" : "Próximos "}${n} meses`}</option>`).join("")}</select></div>`}
@@ -977,6 +979,8 @@ function readReportFields() {
   if (v("rep-months")) rep.months = v("rep-months").value === "year" ? "year" : Number(v("rep-months").value);
   if (v("rep-group")) rep.group = v("rep-group").value;
   if (v("rep-measure")) rep.measure = v("rep-measure").value;
+  if (v("rep-from")) rep.from = v("rep-from").value;
+  if (v("rep-to")) rep.to = v("rep-to").value;
   if (v("rep-from-year")) rep.from = `${v("rep-from-year").value.replace(/\D/g, "")}-01-01`;
   if (v("rep-to-year")) rep.to = `${v("rep-to-year").value.replace(/\D/g, "")}-12-31`;
   if (v("rep-limit")) rep.limit = Number(v("rep-limit").value.replace(/\D/g, "")) / 100 || null;
@@ -1064,7 +1068,10 @@ async function saveReport() {
       accounts: accounts.length === state.accounts.length ? null : accounts,
       categories: all ? null : [...e.categories], tags: allTags ? null : [...e.tags] };
     if (e.type === "monthly") Object.assign(config, { group: e.group, measure: e.measure, limit: e.limit || null });
-    if (e.period === "fixed") Object.assign(config, { from: e.from, to: e.to });
+    if (e.period === "fixed") {
+      if (!e.from || !e.to || e.to < e.from) return toast("Confira as datas do período");
+      Object.assign(config, { from: e.from, to: e.to });
+    }
   } else if (e.type === "networth") {
     const y0 = Number(e.from.slice(0, 4)), y1 = Number(e.to.slice(0, 4));
     if (!(y0 >= 2000 && y1 >= y0 && y1 <= 2100)) return toast("Confira os anos do período");
@@ -2279,8 +2286,8 @@ document.addEventListener("click", async (ev) => {
         const y = new Date().getFullYear();
         Object.assign(rep, { from: `${y - 2}-01-01`, to: `${y + 15}-12-31` });
       }
-      if (rep.type === "monthly" && !MONTHLY_PERIODS.some(([v]) => v === rep.period)) rep.period = "last_12";
-      if (rep.type === "summary" && !SUMMARY_PERIODS.some(([v]) => v === rep.period)) rep.period = "this_month";
+      if (rep.type === "monthly" && rep.period !== "fixed" && !MONTHLY_PERIODS.some(([v]) => v === rep.period)) rep.period = "last_12";
+      if (rep.type === "summary" && rep.period !== "fixed" && !SUMMARY_PERIODS.some(([v]) => v === rep.period)) rep.period = "this_month";
       return drawReportEditor();
     case "rep-accounts": return openRepAccounts();
     case "rep-categories": return openRepCategories();
@@ -2356,6 +2363,7 @@ document.addEventListener("change", (ev) => {
     loadBalanceAt().then(() => { if (chk) drawCheck(); });
   }
   // trocar o que o relatório mostra muda os campos (transferências não têm categoria)
+  if (ev.target.id === "rep-period" && rep) { readReportFields(); drawReportEditor(); }
   if (ev.target.id === "rep-measure" && rep) { readReportFields(); drawReportEditor(); }
 });
 
