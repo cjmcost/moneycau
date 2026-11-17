@@ -133,7 +133,7 @@ async function loadAll() {
       must(sb.from("categories").select("id,parent_id,name,kind,display_order").order("display_order")),
       fetchAll(() => sb.from("payee_usage").select("id,name,default_category_id,uses,last_used")
         .order("uses", { ascending: false }).order("id")),
-      must(sb.from("tags").select("id,name").order("name")),
+      must(sb.from("tags").select("id,name,archived").order("name")),
       fetchAll(() => sb.from("description_usage").select("description,uses,payee_id,payee_share,category_id")
         .order("uses", { ascending: false }).order("description")),
     ]);
@@ -625,6 +625,22 @@ document.addEventListener("touchend", (ev) => {
   if (Math.abs(dx) > 50 && Math.abs(dx) > 2 * Math.abs(dy)) calMove(dx < 0 ? 1 : -1);
 });
 
+// Tela: Tags ---------------------------------------------------------------------
+// Uma tag por projeto (Viagem Monte Verde, Festa Natal 2026...). Quando o projeto acaba,
+// arquivar tira a tag do seletor do lançamento; ela continua na busca e nos relatórios.
+
+function viewTags() {
+  const row = (t) => `<label class="row check"><input type="checkbox" data-tag-archive="${t.id}" ${t.archived ? "" : "checked"}>
+    <div class="main"><div class="title">${esc(t.name)}</div></div></label>`;
+  const active = state.tags.filter((t) => !t.archived), archived = state.tags.filter((t) => t.archived);
+  render(`<div class="topbar"><button class="back" data-go="#/mais">‹ Mais</button><h1>Tags</h1></div>
+    <div class="meta-line">Marcadas aparecem ao lançar. Desmarque para arquivar a tag de um projeto que terminou.</div>
+    <div class="section-title"><span>Ativas</span><span>${active.length}</span></div>
+    <div class="list">${active.map(row).join("") || '<div class="empty">Nenhuma.</div>'}</div>
+    <div class="section-title"><span>Arquivadas</span><span>${archived.length}</span></div>
+    <div class="list">${archived.map(row).join("") || '<div class="empty">Nenhuma.</div>'}</div>`, "mais");
+}
+
 // Tela: Mais ---------------------------------------------------------------------
 
 function viewMore() {
@@ -637,6 +653,8 @@ function viewMore() {
       <button class="row" data-action="reload"><div class="main"><div class="title">Atualizar dados</div></div></button>
       <button class="row" data-go="#/operacoes"><div class="main"><div class="title">Todas as operações</div>
         <div class="meta">Busca em todas as contas e meses, com parcelas futuras e total</div></div><span class="chev">›</span></button>
+      <button class="row" data-go="#/tags"><div class="main"><div class="title">Tags</div>
+        <div class="meta">Arquivar as tags de projetos que já terminaram</div></div><span class="chev">›</span></button>
       <button class="row" data-go="#/orcamento"><div class="main"><div class="title">Exportar para o Orçamento</div>
         <div class="meta">Resumo do mês em CSV, no formato do MoneyWiz</div></div><span class="chev">›</span></button>
     </div>
@@ -1024,7 +1042,7 @@ function openRepTags() {
   readReportFields();
   rep.sheet = "tags";
   if (!rep.tags) rep.tags = new Set(state.tags.map((t) => t.id));
-  checkSheet("Tags", [{ items: state.tags.map((t) => ({ id: t.id, label: t.name })) }], (id) => rep.tags.has(id));
+  checkSheet("Tags", [{ items: state.tags.map((t) => ({ id: t.id, label: t.name, sub: t.archived ? "arquivada" : "" })) }], (id) => rep.tags.has(id));
   document.querySelector(".sheet .pick-all").insertAdjacentHTML("afterend",
     '<div class="meta-line">Com todas marcadas, o relatório não filtra por tag. Marque só algumas para ver apenas o que tem essas tags.</div>');
 }
@@ -1964,12 +1982,13 @@ function openTagPicker() {
   readEntryFields();
   const draw = (q = "") => {
     const n = norm(q.trim());
-    const list = state.tags.filter((t) => !n || norm(t.name).includes(n));
+    // arquivadas só aparecem se já estiverem no lançamento ou na busca
+    const list = state.tags.filter((t) => (n ? norm(t.name).includes(n) : !t.archived || entry.tags.includes(t.id)));
     const exact = state.tags.some((t) => norm(t.name) === n);
     document.getElementById("tag-list").innerHTML =
       (n && !exact ? `<button class="row" data-action="new-tag" data-name="${esc(q.trim())}"><div class="main"><div class="title">Criar “${esc(q.trim())}”</div></div></button>` : "") +
       list.map((t) => `<label class="row check"><input type="checkbox" data-tag="${t.id}" ${entry.tags.includes(t.id) ? "checked" : ""}>
-        <div class="main"><div class="title">${esc(t.name)}</div></div></label>`).join("") ||
+        <div class="main"><div class="title">${esc(t.name)}</div>${t.archived ? '<div class="meta">arquivada</div>' : ""}</div></label>`).join("") ||
       '<div class="empty">Nenhuma tag ainda. Digite um nome para criar.</div>';
   };
   $sheet.innerHTML = `<div class="sheet-backdrop" data-action="back-entry"></div>
@@ -2211,7 +2230,7 @@ document.addEventListener("click", async (ev) => {
     }
     case "pick-tags": return openTagPicker();
     case "new-tag": {
-      const tag = await must(sb.from("tags").insert({ name: el.dataset.name }).select("id,name").single());
+      const tag = await must(sb.from("tags").insert({ name: el.dataset.name }).select("id,name,archived").single());
       setTags([...state.tags, tag]);
       entry.tags.push(tag.id);
       document.getElementById("tag-search").value = "";
@@ -2414,6 +2433,13 @@ document.addEventListener("change", async (ev) => {
     state.accById.get(budgetAcc).in_budget = on;
     return viewBudget();
   }
+  const tagArch = ev.target.dataset?.tagArchive;
+  if (tagArch) {
+    const archived = !ev.target.checked;
+    await must(sb.from("tags").update({ archived }).eq("id", tagArch));
+    state.tagById.get(tagArch).archived = archived;
+    return viewTags();
+  }
   if (!entry) return;
   const tag = ev.target.dataset?.tag;
   if (tag) {
@@ -2444,6 +2470,7 @@ function route() {
     case "recentes": return viewAllOps();
     case "mais": return viewMore();
     case "orcamento": return viewBudget();
+    case "tags": return viewTags();
     case "relatorios": return viewReports();
     case "relatorio": return viewReport(arg);
     default: return viewAccounts();
