@@ -1198,6 +1198,7 @@ function chartCursor(ev) {
   if (!svg || !fcChart || svg.classList.contains("bars")) return;
   const c = fcChart, box = svg.getBoundingClientRect(), scale = box.width / c.W;
   if (c.monthly) return monthCursor(svg, c, scale, (ev.clientX - box.left) / scale);
+  if (c.series) return seriesCursor(svg, c, scale, (ev.clientX - box.left) / scale);
   const d = Math.round(Math.min(1, Math.max(0, (ev.clientX - box.left) / scale / c.PW)) * c.days);
   let v = c.pts[0][1];
   for (const [x, val] of c.pts) { if (x > d) break; v = val; }
@@ -1220,6 +1221,19 @@ function monthCursor(svg, c, scale, x) {
   const left = svg.offsetLeft + px * scale, w = tip.offsetWidth, max = svg.parentElement.clientWidth - w - 4;
   tip.style.left = `${Math.min(max, Math.max(4, left - w / 2))}px`;
 }
+// Na previsão por conta, a dica mostra o saldo de cada conta no dia.
+function seriesCursor(svg, c, scale, x) {
+  const d = Math.round(Math.min(1, Math.max(0, x / c.PW)) * c.days), px = c.X(d);
+  const cur = svg.querySelector(".cursor"), tip = svg.parentElement.querySelector(".chart-tip");
+  cur.setAttribute("x1", px); cur.setAttribute("x2", px);
+  [cur, tip].forEach((el) => el.removeAttribute("hidden"));
+  tip.innerHTML = `<span>${yearDay(addDays(c.t0, d))}</span>` + c.series.map((sr) => {
+    const v = sr.at(d);
+    return `<span><i class="sw ${sr.cls}"></i><b class="${signClass(v)}">${compactMoney(v)}</b></span>`;
+  }).join("");
+  const left = svg.offsetLeft + px * scale, w = tip.offsetWidth, max = svg.parentElement.clientWidth - w - 4;
+  tip.style.left = `${Math.min(max, Math.max(4, left - w / 2))}px`;
+}
 function chartCursorOff(ev) {
   const chart = ev.target.closest?.(".chart");
   if (!chart || chart.contains(ev.relatedTarget)) return;
@@ -1228,6 +1242,83 @@ function chartCursorOff(ev) {
 document.addEventListener("pointermove", chartCursor);
 document.addEventListener("pointerdown", chartCursor);
 document.addEventListener("pointerout", chartCursorOff);
+
+// Previsão por conta: uma linha por conta no gráfico, quadro com hoje/fim/menor saldo e o
+// saldo de cada conta no fim de cada mês (com o total). Os itens já vêm com a conta (acc).
+function forecastByAccount(accs, items, to) {
+  const t0 = today();
+  const day = (iso) => Math.max(0, Math.round((parseDate(iso) - parseDate(t0)) / 864e5));
+  const days = Math.max(1, day(to));
+  const series = accs.map((id, i) => {
+    const start = Number(state.balances.get(id)?.current_balance || 0);
+    let bal = start, min = { bal: start, date: t0 };
+    const pts = [[0, start]], monthEnd = new Map();
+    for (const it of items) {
+      if (it.acc !== id) continue;
+      bal = Math.round((bal + it.amount) * 100) / 100;
+      pts.push([day(it.date), bal]);
+      if (bal < min.bal) min = { bal, date: it.date };
+    }
+    return { id, cls: `s${(i % 8) + 1}`, name: state.accById.get(id)?.name || "Conta", start, end: bal, min, pts };
+  });
+  // saldo de uma série num dia (último ponto até ele)
+  const at = (sr, d) => { let v = sr.pts[0][1]; for (const [x, val] of sr.pts) { if (x > d) break; v = val; } return v; };
+  // gráfico
+  const vals = series.flatMap((sr) => sr.pts.map((p) => p[1]));
+  const vmin = Math.min(...vals), vmax = Math.max(...vals);
+  let lo = vmin >= 0 && vmin < vmax * 0.25 ? 0 : vmin, hi = vmax;
+  if (hi - lo < 1) { hi += 50; lo -= 50; }
+  const step = (() => { const raw = (hi - lo) / 4, p = 10 ** Math.floor(Math.log10(raw)); return [1, 2, 5, 10].map((k) => k * p).find((x) => x >= raw); })();
+  lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+  const PW = 296, W = 340, H = 150, top = 20, bottom = H - 20;
+  const X = (x) => (x / days) * PW, Y = (v) => top + ((hi - v) / (hi - lo)) * (bottom - top);
+  const f = (n) => n.toFixed(1);
+  let grid = "";
+  for (let v = lo; v <= hi + step / 2; v += step) {
+    grid += `<line class="${Math.abs(v) < step / 2 ? "zero" : "grid"}" x1="0" x2="${PW}" y1="${f(Y(v))}" y2="${f(Y(v))}"/><text x="${PW + 5}" y="${f(Y(v) + 3)}">${compactMoney(v)}</text>`;
+  }
+  const nMonths = Math.round(days / 30.4), every = Math.max(1, Math.ceil(nMonths / 8));
+  let ticks = "";
+  for (let m = new Date(parseDate(t0).getFullYear(), parseDate(t0).getMonth() + 1, 1); ; m.setMonth(m.getMonth() + 1)) {
+    const iso = `${m.getFullYear()}-${pad(m.getMonth() + 1)}-01`, x = X(day(iso));
+    if (day(iso) >= days) break;
+    if (m.getMonth() % every) continue;
+    const label = MONTHS[m.getMonth()].slice(0, 3).toLowerCase() + (m.getMonth() === 0 ? `/${String(m.getFullYear()).slice(2)}` : "");
+    ticks += `<line class="tick" x1="${f(x)}" x2="${f(x)}" y1="${top}" y2="${bottom}"/><text x="${f(x)}" y="${H - 4}" text-anchor="middle">${label}</text>`;
+  }
+  const lines = series.map((sr) => {
+    let d = `M0,${f(Y(sr.start))}`;
+    sr.pts.slice(1).forEach(([x, v]) => { d += `H${f(X(x))}V${f(Y(v))}`; });
+    return `<path class="line acc ${sr.cls}" d="${d}H${PW}"/>`;
+  }).join("");
+  fcChart = { series: series.map((sr) => ({ ...sr, at: (d) => at(sr, d) })), t0, days, PW, W, X, Y };
+  const chart = `<div class="legend">${series.map((sr) => `<span><i class="sw ${sr.cls}"></i>${esc(sr.name)}</span>`).join("")}</div>
+  <div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Saldo previsto por conta">${grid}${ticks}${lines}
+    <line class="cursor" x1="0" x2="0" y1="${top}" y2="${bottom}" hidden/></svg><div class="chart-tip multi" hidden></div></div>`;
+  // quadro por conta
+  const total = (k) => series.reduce((a, sr) => a + sr[k], 0);
+  const cards = `<div class="section-title"><span>Por conta</span></div><div class="list">${series.map((sr) => `<div class="row">
+    <div class="main"><div class="title"><i class="sw ${sr.cls}"></i> ${esc(sr.name)}</div>
+      <div class="meta">Hoje ${money(sr.start)} · menor <span class="${signClass(sr.min.bal)}">${money(sr.min.bal)}</span> em ${yearDay(sr.min.date)}</div></div>
+    <div class="amount ${signClass(sr.end)}">${money(sr.end)}<small>em ${yearDay(to)}</small></div></div>`).join("")}
+    <div class="row"><div class="main"><div class="title strong">Total</div><div class="meta">Hoje ${money(total("start"))}</div></div>
+    <div class="amount ${signClass(total("end"))}">${money(total("end"))}</div></div></div>`;
+  // tabela mês a mês (saldo no fim de cada mês)
+  const months = [];
+  for (let m = new Date(parseDate(t0).getFullYear(), parseDate(t0).getMonth(), 1); ; m.setMonth(m.getMonth() + 1)) {
+    const first = `${m.getFullYear()}-${pad(m.getMonth() + 1)}-01`;
+    if (first > to) break;
+    const end = monthEnd(first) < to ? monthEnd(first) : to;
+    months.push({ first, d: day(end) });
+  }
+  const table = `<div class="section-title"><span>Saldo no fim do mês</span></div>
+  <div class="table-wrap"><table class="acc-table"><thead><tr><th></th>${series.map((sr) => `<th><i class="sw ${sr.cls}"></i> ${esc(sr.name)}</th>`).join("")}<th>Total</th></tr></thead>
+  <tbody>${months.map(({ first, d }) => {
+    const v = series.map((sr) => at(sr, d)), t = v.reduce((a, b) => a + b, 0);
+    return `<tr><th>${shortMonth(first)}</th>${v.map((x) => `<td class="${signClass(x)}">${money(x)}</td>`).join("")}<td class="strong ${signClass(t)}">${money(t)}</td></tr>`;
+  }).join("")}</tbody></table></div>`;
+  return chart + cards + table;
+}
 
 async function viewForecast(r) {
   const accs = r.config.accounts, inSet = new Set(accs), to = forecastEnd(r.config), multi = accs.length > 1;
@@ -1239,16 +1330,16 @@ async function viewForecast(r) {
   const items = [];
   for (const t of txs) {
     txCache.set(t.id, t);
-    items.push({ date: t.date, amount: Number(t.amount), row: (bal) => txRow(t, { withAccount: multi, running: bal, currency: state.accById.get(t.account_id)?.currency }) });
+    items.push({ date: t.date, amount: Number(t.amount), acc: t.account_id, row: (bal) => txRow(t, { withAccount: multi, running: bal, currency: state.accById.get(t.account_id)?.currency }) });
   }
   const schedById = new Map(state.scheduled.map((s) => [s.id, s]));
   for (const o of occs) {
     const s = schedById.get(o.scheduled_id);
     if (!s || o.skipped) continue;
     const legs = [];
-    if (inSet.has(s.account_id)) legs.push(Number(o.amount));
-    if (s.kind === "transfer" && inSet.has(s.recipient_account_id)) legs.push(-Number(o.amount));
-    legs.forEach((amount) => items.push({ date: o.date, amount, row: (bal) => occRow(o, s, amount, bal, multi) }));
+    if (inSet.has(s.account_id)) legs.push([Number(o.amount), s.account_id]);
+    if (s.kind === "transfer" && inSet.has(s.recipient_account_id)) legs.push([-Number(o.amount), s.recipient_account_id]);
+    legs.forEach(([amount, acc]) => items.push({ date: o.date, amount, acc, row: (bal) => occRow(o, s, amount, bal, multi) }));
   }
   // no mesmo dia, entradas antes das saídas (o saldo do dia não "afunda" à toa)
   items.sort((a, b) => a.date.localeCompare(b.date) || b.amount - a.amount);
@@ -1270,17 +1361,20 @@ async function viewForecast(r) {
     if (items[i + 1]?.date.slice(0, 7) !== month) list += "</div>";
   });
   const names = accs.map((id) => state.accById.get(id)?.name).filter(Boolean);
+  const byAcc = multi && r.config.view === "accounts";
   render(`<div class="topbar"><button class="back" data-go="#/relatorios">‹ Relatórios</button></div>
     <div class="topbar"><h1>${esc(r.name)}</h1><button class="back" data-action="report-edit" data-id="${r.id}">Editar</button></div>
     <div class="meta-line">${esc(names.length > 2 ? `${names.length} contas` : names.join(" e "))} · até ${yearDay(to)}</div>
     <div class="segmented">${FORECAST_MONTHS.map((n) => `<button class="${(r.config.months || 3) === n ? "on" : ""}" data-action="fc-months" data-id="${r.id}" data-n="${n}">${n} meses</button>`).join("")}</div>
-    ${forecastChart(start, items, to)}
+    ${multi ? `<div class="segmented">${[["total", "Total"], ["accounts", "Por conta"]].map(([v, l]) =>
+      `<button class="${(byAcc ? "accounts" : "total") === v ? "on" : ""}" data-action="fc-view" data-id="${r.id}" data-n="${v}">${l}</button>`).join("")}</div>` : ""}
+    ${byAcc ? forecastByAccount(accs, items, to) : `${forecastChart(start, items, to)}
     <div class="hero"><div class="label">Saldo hoje</div>
       <div class="value ${signClass(start)}">${money(start)}</div>
       <div class="sub">Em ${yearDay(to)}: <span class="${signClass(bal)}">${money(bal)}</span></div>
       <div class="sub">Menor saldo: <span class="${signClass(min.bal)}">${money(min.bal)}</span> em ${yearDay(min.date)}</div></div>
     <div class="forecast">${list || '<div class="empty">Nada previsto neste período.</div>'}</div>
-    <div class="meta-line">Toque num agendado para mudar o valor ou a data só naquela ocorrência.</div>`, "relatorios");
+    <div class="meta-line">Toque num agendado para mudar o valor ou a data só naquela ocorrência.</div>`}`, "relatorios");
 }
 
 // Tela: patrimônio (o "Net Worth 65 anos" do MoneyWiz) -------------------------------
@@ -2275,6 +2369,12 @@ document.addEventListener("click", async (ev) => {
     case "occ-series": { const sid = occ.s.id; closeSheet(); return editScheduled(sid); }
     case "dup-entry": return duplicateEntry();
     case "dup-sched": { const s = state.scheduled.find((x) => x.id === entry.schedId); return duplicateScheduled(s, s.next_date, entry.cents); }
+    case "fc-view": {
+      const r = state.reports.find((x) => x.id === id);
+      r.config = { ...r.config, view: el.dataset.n };
+      await must(sb.from("reports").update({ config: r.config }).eq("id", id));
+      return route();
+    }
     case "fc-months": {
       const r = state.reports.find((x) => x.id === id);
       r.config = { ...r.config, months: Number(el.dataset.n) };

@@ -304,3 +304,17 @@ button { cursor: pointer; }
 /* Aviso de lançamentos feitos sem internet / app aberto sem internet */
 .net-bar { display: block; width: 100%; margin: 0 0 12px; padding: 10px 14px; border: 0; border-radius: var(--radius);
   background: color-mix(in srgb, #d97706 16%, var(--surface)); color: var(--text); font-size: 14px; text-align: left; }
+
+/* previsão por conta */
+.chart .line.acc { stroke-width: 1.75; }
+.chart .line.s1 { stroke: var(--card-1); } .chart .line.s2 { stroke: var(--card-2); }
+.chart .line.s3 { stroke: var(--card-3); } .chart .line.s4 { stroke: var(--card-4); }
+.chart .line.s5 { stroke: var(--card-5); } .chart .line.s6 { stroke: var(--card-6); }
+.chart .line.s7 { stroke: var(--card-7); } .chart .line.s8 { stroke: var(--card-8); }
+.chart-tip.multi span { display: inline-flex; align-items: center; gap: 4px; }
+.table-wrap { overflow-x: auto; background: var(--surface); border-radius: var(--radius); margin-bottom: 20px; -webkit-overflow-scrolling: touch; }
+.acc-table { border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; min-width: 100%; }
+.acc-table th, .acc-table td { padding: 8px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line, rgba(127,127,127,.15)); }
+.acc-table thead th { color: var(--muted); font-weight: 600; font-size: 12px; vertical-align: bottom; }
+.acc-table tbody th { text-align: left; color: var(--muted); font-weight: 500; position: sticky; left: 0; background: var(--surface); }
+.acc-table .strong { font-weight: 700; }
